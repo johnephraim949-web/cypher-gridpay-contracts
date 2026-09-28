@@ -77,6 +77,29 @@ Soroban networks enforce a maximum contract deployment size of **256 KB** (262,1
 
 After making changes, run `make build` to re-check the size.
 
+### 🪝 Git Pre-Commit Hooks
+
+To ensure that code is consistently formatted and passes compilation checks before committing, pre-commit hook configurations are provided:
+
+#### Option A: Using `pre-commit` tool
+Install the `pre-commit` package and install the hooks:
+```bash
+pip install pre-commit
+pre-commit install
+```
+This automatically runs `cargo fmt --all -- --check` and `cargo check` across both `core` and `orchestrator` workspaces whenever you execute `git commit`.
+
+#### Option B: Standalone shell script hook
+If you prefer not to install Python's `pre-commit`, you can link the native hook script directly into your local git repository:
+```bash
+ln -sf ../../scripts/pre-commit.sh .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
+```
+To run the pre-commit checks manually at any time:
+```bash
+./scripts/pre-commit.sh
+```
+
 ## 🔄 Development Workflow
 
 ### 1. Create a Feature Branch

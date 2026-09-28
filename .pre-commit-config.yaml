@@ -1,0 +1,31 @@
+# .pre-commit-config.yaml
+# Pre-commit configuration for Cypher GridPay Smart Contracts
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Ensure all code adheres to Rust code formatting conventions
+        entry: bash -c "cd core && cargo fmt --all -- --check && cd ../orchestrator && cargo fmt --all -- --check"
+        language: system
+        files: '\.rs$'
+        pass_filenames: false
+
+      - id: cargo-check
+        name: cargo check
+        description: Verify compilation across workspaces without generating binaries
+        entry: bash -c "cd core && cargo check && cd ../orchestrator && cargo check"
+        language: system
+        files: '\.rs$'
+        pass_filenames: false
