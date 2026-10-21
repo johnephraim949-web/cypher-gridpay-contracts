@@ -45,6 +45,8 @@ pub enum ConfigKey {
     EvidenceDeadlineConfig,
     ThresholdVersion,
     ProposalApprovalVersion(String),
+    /// Address of the authorized dispute oracle that may submit rubric evaluations.
+    DisputeOracle,
 }
 
 #[derive(Clone)]
@@ -118,6 +120,10 @@ pub enum DisputeKey {
     AppealRecord(u64, u64),
     LiquidationConfig,
     LiquidationHistory(u64),
+    /// Stores `DisputeRubricEvaluation` for a given escrow ID.
+    RubricEvaluation(u64),
+    /// Stores the fast-track confidence threshold in basis points (u32).
+    FastTrackThresholdBps,
 }
 
 #[derive(Clone)]
@@ -129,6 +135,10 @@ pub enum DataKey {
     Dispute(DisputeKey),
     VoteWeight(u64, Address),
     ReleaseThresholdBps(u64),
+    /// Pending timelocked key rotation for a participant: (escrow_id, old_address) → PendingKeyRotation.
+    RotationRequest(u64, Address),
+    /// Optional social-recovery guardian registered by a participant: (escrow_id, participant) → guardian Address.
+    RecoveryGuardian(u64, Address),
 }
 
 /// Administrative, multi-sig, and protocol configuration errors for EscrowContract.
@@ -234,6 +244,12 @@ pub enum EscrowError {
     /// Clawback delay parameter is below protocol minimum safety delay. Resolution: increase clawback delay.
     ClawbackDelayTooShort = 229,
     EvidenceLimitExceeded = 230,
+    /// A key rotation request for this participant is still within its mandatory timelock window. Resolution: wait until rotation_timelock_secs have elapsed.
+    RotationTimelockActive = 231,
+    /// No pending key rotation request found for this participant on this escrow. Resolution: call propose_participant_key_rotation first.
+    RotationNotFound = 232,
+    /// The supplied new_participant address is already a participant or arbiter on this escrow. Resolution: choose an address not already registered.
+    DuplicateParticipant = 233,
 }
 
 /// Errors relating to disputes, arbitration, evidence, observers, and token swaps.
@@ -274,6 +290,18 @@ pub enum ActionError {
     /// Deposited collateral balance is insufficient for this operation. Resolution: fund additional collateral to escrow.
     InsufficientCollateral = 315,
     ArbitrationRequired = 316,
+    /// Rubric recommendation has been vetoed by a party; escalates to full arbitration. Resolution: proceed via standard resolve_dispute.
+    RecommendationVetoed = 317,
+    /// Rubric recommendation has already been finalized or does not exist. Resolution: check escrow status.
+    RecommendationNotPending = 318,
+    /// Caller is not the authorized dispute oracle for this recommendation. Resolution: call from the oracle address that signed the rubric.
+    NotDisputeOracle = 319,
+    /// The rubric basis-points split does not sum to 10,000. Resolution: ensure recommended_buyer_bps + recommended_seller_bps == 10_000.
+    InvalidRubricSplit = 320,
+    /// The challenge window has not yet closed; call finalize_recommended_resolution after challenge_window_ends_at. Resolution: wait for challenge window to pass.
+    ChallengeWindowOpen = 321,
+    /// The recommendation confidence is below the fast-track threshold; cannot auto-finalize. Resolution: use resolve_dispute for manual arbitration.
+    ConfidenceBelowFastTrack = 322,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -320,10 +348,10 @@ impl TryFrom<soroban_sdk::Error> for Error {
     fn try_from(error: soroban_sdk::Error) -> Result<Self, Self::Error> {
         if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
             let code = error.get_code();
-            if code >= 300 && code <= 316 {
+            if code >= 300 && code <= 322 {
                 return Ok(Error::Action(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 200 && code <= 230 {
+            if code >= 200 && code <= 233 {
                 return Ok(Error::Escrow(unsafe { core::mem::transmute(code) }));
             }
             if code >= 100 && code <= 114 {
@@ -674,6 +702,37 @@ pub struct MultiPartyEscrowReleased {
     pub escrow_id: u64,
 }
 
+/// Emitted when a participant (or their recovery guardian) proposes a key rotation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyRotationProposed {
+    pub escrow_id: u64,
+    pub old_participant: Address,
+    pub new_participant: Address,
+    pub proposed_by: Address,
+    pub executable_after: u64,
+}
+
+/// Emitted when a participant or counterparty vetoes a pending key rotation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyRotationVetoed {
+    pub escrow_id: u64,
+    pub old_participant: Address,
+    pub vetoed_by: Address,
+    pub vetoed_at: u64,
+}
+
+/// Emitted when a timelocked key rotation is successfully executed.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyRotationExecuted {
+    pub escrow_id: u64,
+    pub old_participant: Address,
+    pub new_participant: Address,
+    pub executed_at: u64,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WeightUpdated {
@@ -902,6 +961,75 @@ pub struct DisputeRecommendation {
     pub merchant_score: i128,
     pub recommendation: DisputeOutcome,
     pub confidence_bps: u32,
+}
+
+/// Rubric-weighted evaluation submitted by an authorized dispute oracle.
+///
+/// The oracle fills in per-dimension scores and a `confidence_bps` figure.
+/// A `rubric_hash` (SHA-256 / keccak of the off-chain rubric document) ties
+/// the on-chain record to the full off-chain reasoning. A short challenge
+/// window lets either party veto the recommendation; once the window closes
+/// and `confidence_bps >= fast_track_threshold_bps`, any caller can finalize.
+#[derive(Clone)]
+#[contracttype]
+pub struct DisputeRubricEvaluation {
+    /// Identifies the disputed escrow.
+    pub escrow_id: u64,
+    /// Fraction of escrow amount recommended for the buyer (customer), in bps (0–10 000).
+    pub recommended_buyer_bps: u32,
+    /// Fraction of escrow amount recommended for the seller (merchant), in bps (0–10 000).
+    /// Invariant: `recommended_buyer_bps + recommended_seller_bps == 10_000`.
+    pub recommended_seller_bps: u32,
+    /// AI/oracle confidence in the recommendation, in bps (0–10 000).
+    pub confidence_bps: u32,
+    /// SHA-256 / keccak hash of the off-chain rubric document (delivery proof score,
+    /// timeliness score, counterparty-reputation score, etc.).
+    pub rubric_hash: BytesN<32>,
+    /// The oracle address that signed and submitted this evaluation.
+    pub oracle_signer: Address,
+    /// Unix timestamp after which a veto is no longer possible and
+    /// `finalize_recommended_resolution` may be called.
+    pub challenge_window_ends_at: u64,
+    /// `true` once the recommendation has been finalized (funds distributed).
+    pub finalized: bool,
+    /// `true` if buyer (customer) vetoed the recommendation during the window.
+    pub buyer_vetoed: bool,
+    /// `true` if seller (merchant) vetoed the recommendation during the window.
+    pub seller_vetoed: bool,
+}
+
+// ── Events for DisputeRubricEvaluation ──────────────────────────────────────
+
+/// Emitted when an oracle submits a rubric-weighted dispute recommendation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeRubricSubmitted {
+    pub escrow_id: u64,
+    pub oracle_signer: Address,
+    pub recommended_buyer_bps: u32,
+    pub recommended_seller_bps: u32,
+    pub confidence_bps: u32,
+    pub challenge_window_ends_at: u64,
+}
+
+/// Emitted when a party vetoes a rubric recommendation (escalates to arbitration).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeRubricVetoed {
+    pub escrow_id: u64,
+    pub vetoed_by: Address,
+    pub vetoed_at: u64,
+}
+
+/// Emitted when the challenge window closes and the rubric recommendation is
+/// automatically finalized (funds distributed proportionally).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeRubricFinalized {
+    pub escrow_id: u64,
+    pub buyer_amount: i128,
+    pub seller_amount: i128,
+    pub finalized_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1139,6 +1267,29 @@ pub struct MultiPartyEscrow {
     pub threshold_bps: u32, // cumulative approved weight needed for release
     pub created_at: u64,
     pub release_timestamp: u64,
+}
+
+/// A timelocked request to swap one participant's signing key for another.
+///
+/// Created by `propose_participant_key_rotation`. Executable by anyone once
+/// `executable_after` has passed and no veto was filed.
+#[derive(Clone)]
+#[contracttype]
+pub struct PendingKeyRotation {
+    /// Multi-party escrow this rotation belongs to.
+    pub escrow_id: u64,
+    /// The participant whose key is being rotated out.
+    pub old_address: Address,
+    /// The new address that will replace `old_address`.
+    pub new_address: Address,
+    /// The address that initiated the request (old_address or its recovery guardian).
+    pub proposed_by: Address,
+    /// Ledger timestamp when the proposal was created.
+    pub proposed_at: u64,
+    /// Earliest timestamp at which `execute_participant_key_rotation` may be called.
+    pub executable_after: u64,
+    /// Whether the rotation was vetoed (blocks execution).
+    pub vetoed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3475,6 +3626,409 @@ impl EscrowContract {
         Ok(())
     }
 
+    // ── Issue #219: Dynamic signer rotation and timelocked recovery guardian ─
+
+    /// Registers an optional social-recovery guardian for a participant on a
+    /// multi-party escrow.  Must be called by the participant themselves before
+    /// any rotation is needed.
+    ///
+    /// # Arguments
+    /// * `env`       - Soroban environment.
+    /// * `participant` - The participant registering a guardian (must `require_auth`).
+    /// * `escrow_id` - The multi-party escrow.
+    /// * `guardian`  - Address that may later propose a key rotation on behalf of `participant`.
+    ///
+    /// # Errors
+    /// * `NotFound`     — escrow does not exist.
+    /// * `Unauthorized` — caller is not a participant on this escrow.
+    /// * `InvalidStatus` — escrow is not `Locked`.
+    pub fn register_recovery_guardian(
+        env: Env,
+        participant: Address,
+        escrow_id: u64,
+        guardian: Address,
+    ) -> Result<(), Error> {
+        participant.require_auth();
+        Self::require_not_paused(&env, "register_recovery_guardian")?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let escrow: MultiPartyEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+            .unwrap();
+        if escrow.status != EscrowStatus::Locked {
+            return Err(Error::Escrow(EscrowError::InvalidStatus));
+        }
+
+        // Caller must be an existing participant.
+        let mut found = false;
+        for p in escrow.participants.iter() {
+            if p.address == participant {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+
+        env.storage().instance().set(
+            &DataKey::RecoveryGuardian(escrow_id, participant),
+            &guardian,
+        );
+
+        Ok(())
+    }
+
+    /// Proposes a timelocked key rotation for a participant on a multi-party escrow.
+    ///
+    /// Callable by either the `old_participant` themselves or their registered
+    /// recovery guardian.  The rotation becomes executable only after
+    /// `rotation_timelock_secs` seconds have elapsed without a veto.
+    ///
+    /// # Arguments
+    /// * `env`                    - Soroban environment.
+    /// * `initiator`              - Caller; must be `old_participant` or their guardian.
+    /// * `escrow_id`              - The multi-party escrow.
+    /// * `old_participant`        - Address being rotated out.
+    /// * `new_participant`        - Address being rotated in.
+    /// * `rotation_timelock_secs` - Mandatory delay before the rotation can execute.
+    ///
+    /// # Errors
+    /// * `NotFound`           — escrow does not exist.
+    /// * `InvalidStatus`      — escrow is not `Locked`.
+    /// * `Unauthorized`       — initiator is neither old_participant nor their guardian.
+    /// * `ParticipantNotFound` — old_participant is not on this escrow.
+    /// * `DuplicateParticipant` — new_participant already exists on this escrow.
+    /// * `RotationTimelockActive` — a pending (non-vetoed) rotation already exists.
+    pub fn propose_participant_key_rotation(
+        env: Env,
+        initiator: Address,
+        escrow_id: u64,
+        old_participant: Address,
+        new_participant: Address,
+        rotation_timelock_secs: u64,
+    ) -> Result<(), Error> {
+        initiator.require_auth();
+        Self::require_not_paused(&env, "propose_participant_key_rotation")?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let escrow: MultiPartyEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+            .unwrap();
+        if escrow.status != EscrowStatus::Locked {
+            return Err(Error::Escrow(EscrowError::InvalidStatus));
+        }
+
+        // Verify old_participant exists on this escrow.
+        let mut old_exists = false;
+        for p in escrow.participants.iter() {
+            if p.address == old_participant {
+                old_exists = true;
+                break;
+            }
+        }
+        if !old_exists {
+            return Err(Error::Basic(BasicError::ParticipantNotFound));
+        }
+
+        // Verify initiator is old_participant or their registered guardian.
+        let guardian: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryGuardian(escrow_id, old_participant.clone()));
+        let is_authorized = initiator == old_participant
+            || guardian.as_ref().map(|g| g == &initiator).unwrap_or(false);
+        if !is_authorized {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+
+        // Reject if new_participant already exists on the escrow.
+        for p in escrow.participants.iter() {
+            if p.address == new_participant {
+                return Err(Error::Escrow(EscrowError::DuplicateParticipant));
+            }
+        }
+
+        // Reject if a non-vetoed rotation is already pending.
+        let existing: Option<PendingKeyRotation> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RotationRequest(escrow_id, old_participant.clone()));
+        if let Some(ref r) = existing {
+            if !r.vetoed {
+                return Err(Error::Escrow(EscrowError::RotationTimelockActive));
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let executable_after = now.saturating_add(rotation_timelock_secs);
+
+        let rotation = PendingKeyRotation {
+            escrow_id,
+            old_address: old_participant.clone(),
+            new_address: new_participant.clone(),
+            proposed_by: initiator.clone(),
+            proposed_at: now,
+            executable_after,
+            vetoed: false,
+        };
+
+        env.storage().instance().set(
+            &DataKey::RotationRequest(escrow_id, old_participant.clone()),
+            &rotation,
+        );
+
+        KeyRotationProposed {
+            escrow_id,
+            old_participant,
+            new_participant,
+            proposed_by: initiator,
+            executable_after,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Vetoes a pending key rotation during the timelock window.
+    ///
+    /// May be called by the `old_participant` themselves (owner veto) or by
+    /// any other participant on the same escrow (counterparty veto).  Once
+    /// vetoed, `execute_participant_key_rotation` will always fail for this
+    /// proposal; a new one must be submitted.
+    ///
+    /// # Arguments
+    /// * `env`             - Soroban environment.
+    /// * `caller`          - Address filing the veto.
+    /// * `escrow_id`       - The multi-party escrow.
+    /// * `old_participant` - The participant whose pending rotation is being vetoed.
+    ///
+    /// # Errors
+    /// * `NotFound`             — escrow does not exist.
+    /// * `Unauthorized`         — caller is not a participant on this escrow.
+    /// * `RotationNotFound`     — no pending rotation exists for old_participant.
+    /// * `RotationTimelockActive` — timelock has already elapsed (veto window is closed).
+    pub fn veto_participant_key_rotation(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+        old_participant: Address,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        Self::require_not_paused(&env, "veto_participant_key_rotation")?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let escrow: MultiPartyEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+            .unwrap();
+
+        // Caller must be a participant on this escrow.
+        let mut caller_is_participant = false;
+        for p in escrow.participants.iter() {
+            if p.address == caller {
+                caller_is_participant = true;
+                break;
+            }
+        }
+        if !caller_is_participant {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+
+        let mut rotation: PendingKeyRotation = env
+            .storage()
+            .instance()
+            .get(&DataKey::RotationRequest(escrow_id, old_participant.clone()))
+            .ok_or(Error::Escrow(EscrowError::RotationNotFound))?;
+
+        // Cannot veto once the timelock window has already closed.
+        let now = env.ledger().timestamp();
+        if now >= rotation.executable_after {
+            return Err(Error::Escrow(EscrowError::RotationTimelockActive));
+        }
+
+        rotation.vetoed = true;
+        env.storage().instance().set(
+            &DataKey::RotationRequest(escrow_id, old_participant.clone()),
+            &rotation,
+        );
+
+        KeyRotationVetoed {
+            escrow_id,
+            old_participant,
+            vetoed_by: caller,
+            vetoed_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Executes a previously proposed key rotation after the timelock has elapsed.
+    ///
+    /// Permissionless — anyone may call this once the timelock window has
+    /// passed and no veto was filed.  The function atomically:
+    ///
+    /// 1. Replaces `old_participant` with `new_participant` in the embedded
+    ///    `participants` vec (preserving `role`, `share_bps`, `weight_bps`).
+    /// 2. Migrates the `DataKey::VoteWeight` entry.
+    /// 3. Migrates the `DataKey::RecoveryGuardian` entry (if present).
+    /// 4. Clears any approval cast by `old_participant` in the current round
+    ///    so the new key must explicitly re-approve.
+    /// 5. Removes the pending rotation record.
+    ///
+    /// # Arguments
+    /// * `env`             - Soroban environment.
+    /// * `escrow_id`       - The multi-party escrow.
+    /// * `old_participant` - The participant being rotated out.
+    ///
+    /// # Errors
+    /// * `NotFound`             — escrow does not exist.
+    /// * `RotationNotFound`     — no pending rotation for old_participant.
+    /// * `RecommendationVetoed` / `RotationTimelockActive` — rotation was vetoed.
+    /// * `TimeoutNotReached`    — timelock has not yet elapsed.
+    pub fn execute_participant_key_rotation(
+        env: Env,
+        escrow_id: u64,
+        old_participant: Address,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env, "execute_participant_key_rotation")?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let mut escrow: MultiPartyEscrow = env
+            .storage()
+            .instance()
+            .get(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)))
+            .unwrap();
+
+        let rotation: PendingKeyRotation = env
+            .storage()
+            .instance()
+            .get(&DataKey::RotationRequest(escrow_id, old_participant.clone()))
+            .ok_or(Error::Escrow(EscrowError::RotationNotFound))?;
+
+        // Rotation must not have been vetoed.
+        if rotation.vetoed {
+            return Err(Error::Escrow(EscrowError::RotationTimelockActive));
+        }
+
+        // Timelock must have elapsed.
+        let now = env.ledger().timestamp();
+        if now < rotation.executable_after {
+            return Err(Error::Escrow(EscrowError::TimeoutNotReached));
+        }
+
+        let new_participant = rotation.new_address.clone();
+
+        // ── Atomic state mutations (CEI: all writes before any cleanup) ──
+
+        // 1. Replace participant in embedded vec; clear any prior approval cast
+        //    by old_participant so the new key must explicitly re-approve.
+        let mut updated_participants = Vec::new(&env);
+        for p in escrow.participants.iter() {
+            if p.address == old_participant {
+                updated_participants.push_back(Participant {
+                    address: new_participant.clone(),
+                    role: p.role.clone(),
+                    share_bps: p.share_bps,
+                    weight_bps: p.weight_bps,
+                    approved: false,       // clear stale approval
+                    approved_at: None,
+                });
+            } else {
+                updated_participants.push_back(p.clone());
+            }
+        }
+        escrow.participants = updated_participants;
+
+        // 2. Remove old_participant from the approvals dedup list.
+        let mut updated_approvals = Vec::new(&env);
+        for addr in escrow.approvals.iter() {
+            if addr != old_participant {
+                updated_approvals.push_back(addr);
+            }
+        }
+        escrow.approvals = updated_approvals;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
+
+        // 3. Migrate VoteWeight: copy old weight to new address, delete old entry.
+        let weight: Option<u32> = env
+            .storage()
+            .instance()
+            .get(&DataKey::VoteWeight(escrow_id, old_participant.clone()));
+        if let Some(w) = weight {
+            env.storage().instance().set(
+                &DataKey::VoteWeight(escrow_id, new_participant.clone()),
+                &w,
+            );
+            env.storage()
+                .instance()
+                .remove(&DataKey::VoteWeight(escrow_id, old_participant.clone()));
+        }
+
+        // 4. Migrate RecoveryGuardian (if present).
+        let guardian: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::RecoveryGuardian(escrow_id, old_participant.clone()));
+        if let Some(g) = guardian {
+            env.storage().instance().set(
+                &DataKey::RecoveryGuardian(escrow_id, new_participant.clone()),
+                &g,
+            );
+            env.storage()
+                .instance()
+                .remove(&DataKey::RecoveryGuardian(escrow_id, old_participant.clone()));
+        }
+
+        // 5. Remove the rotation record.
+        env.storage()
+            .instance()
+            .remove(&DataKey::RotationRequest(escrow_id, old_participant.clone()));
+
+        KeyRotationExecuted {
+            escrow_id,
+            old_participant,
+            new_participant,
+            executed_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
     /// Creates multi token escrow.
     ///
     /// # Arguments
@@ -5452,6 +6006,346 @@ impl EscrowContract {
             confidence_bps,
         }
     }
+
+
+    // ── Issue #218: Rubric-weighted AI/Oracle dispute recommendation ─────────
+
+    /// Registers the authorized dispute oracle address and the fast-track
+    /// confidence threshold.  Only an admin may call this.
+    ///
+    /// # Arguments
+    /// * `env`                      - Soroban environment.
+    /// * `admin`                    - An active admin address.
+    /// * `oracle`                   - The oracle address that will be permitted
+    ///   to call `submit_dispute_recommendation`.
+    /// * `fast_track_threshold_bps` - Minimum `confidence_bps` required for
+    ///   permissionless finalization (e.g. `9_000` = 90 %).
+    ///
+    /// # Errors
+    /// Returns `BasicError::NotAnAdmin` if the caller is not an admin.
+    pub fn set_dispute_oracle(
+        env: Env,
+        admin: Address,
+        oracle: Address,
+        fast_track_threshold_bps: u32,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_not_paused(&env, "set_dispute_oracle")?;
+        let multisig = Self::get_multisig_config(env.clone());
+        if !multisig.admins.contains(&admin) {
+            return Err(Error::Basic(BasicError::NotAnAdmin));
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::DisputeOracle), &oracle);
+        env.storage().instance().set(
+            &DataKey::Dispute(DisputeKey::FastTrackThresholdBps),
+            &fast_track_threshold_bps,
+        );
+        Ok(())
+    }
+
+    /// Submits a rubric-weighted oracle recommendation for a disputed escrow.
+    ///
+    /// The caller must be the configured dispute oracle (set via
+    /// `set_dispute_oracle`).  The escrow must be in `Disputed` status.
+    ///
+    /// # Arguments
+    /// * `env`                      - Soroban environment.
+    /// * `oracle`                   - Oracle address (must match the registered oracle).
+    /// * `escrow_id`                - Disputed escrow.
+    /// * `recommended_buyer_bps`    - Fraction of escrow amount for the buyer,
+    ///   in basis points (0–10 000).
+    /// * `recommended_seller_bps`   - Fraction of escrow amount for the seller,
+    ///   in basis points (0–10 000).
+    ///   Invariant: `recommended_buyer_bps + recommended_seller_bps == 10_000`.
+    /// * `confidence_bps`           - Oracle confidence score (0–10 000).
+    /// * `rubric_hash`              - Hash of the off-chain rubric document.
+    /// * `challenge_window_seconds` - Duration (seconds) of the veto window.
+    ///
+    /// # Errors
+    /// * `NotDisputeOracle`         — caller is not the registered oracle.
+    /// * `NotDisputed`              — escrow is not in `Disputed` status.
+    /// * `InvalidRubricSplit`       — bps do not sum to 10 000.
+    /// * `RecommendationNotPending` — a pending evaluation already exists.
+    pub fn submit_dispute_recommendation(
+        env: Env,
+        oracle: Address,
+        escrow_id: u64,
+        recommended_buyer_bps: u32,
+        recommended_seller_bps: u32,
+        confidence_bps: u32,
+        rubric_hash: BytesN<32>,
+        challenge_window_seconds: u64,
+    ) -> Result<(), Error> {
+        oracle.require_auth();
+        Self::require_not_paused(&env, "submit_dispute_recommendation")?;
+
+        // Verify caller is the registered dispute oracle.
+        let registered_oracle: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::DisputeOracle));
+        match registered_oracle {
+            Some(ref addr) if *addr == oracle => {}
+            _ => return Err(Error::Action(ActionError::NotDisputeOracle)),
+        }
+
+        // Escrow must exist and be in Disputed status.
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::Data(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let escrow = EscrowContract::get_escrow(&env, escrow_id);
+        if escrow.status != EscrowStatus::Disputed {
+            return Err(Error::Action(ActionError::NotDisputed));
+        }
+
+        // Enforce bps invariant.
+        if recommended_buyer_bps
+            .checked_add(recommended_seller_bps)
+            .unwrap_or(u32::MAX)
+            != 10_000
+        {
+            return Err(Error::Action(ActionError::InvalidRubricSplit));
+        }
+
+        // Reject a second submission when a non-finalized, non-vetoed evaluation exists.
+        let existing: Option<DisputeRubricEvaluation> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(DisputeKey::RubricEvaluation(escrow_id)));
+        if let Some(ref eval) = existing {
+            if !eval.finalized && !eval.buyer_vetoed && !eval.seller_vetoed {
+                return Err(Error::Action(ActionError::RecommendationNotPending));
+            }
+        }
+
+        let now = env.ledger().timestamp();
+        let challenge_window_ends_at = now.saturating_add(challenge_window_seconds);
+
+        let evaluation = DisputeRubricEvaluation {
+            escrow_id,
+            recommended_buyer_bps,
+            recommended_seller_bps,
+            confidence_bps,
+            rubric_hash,
+            oracle_signer: oracle.clone(),
+            challenge_window_ends_at,
+            finalized: false,
+            buyer_vetoed: false,
+            seller_vetoed: false,
+        };
+
+        env.storage().instance().set(
+            &DataKey::Dispute(DisputeKey::RubricEvaluation(escrow_id)),
+            &evaluation,
+        );
+
+        DisputeRubricSubmitted {
+            escrow_id,
+            oracle_signer: oracle,
+            recommended_buyer_bps,
+            recommended_seller_bps,
+            confidence_bps,
+            challenge_window_ends_at,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Allows the buyer (customer) or seller (merchant) to veto an oracle
+    /// rubric recommendation during the challenge window, escalating the
+    /// dispute to full human / multi-party arbitration.
+    ///
+    /// # Arguments
+    /// * `env`       - Soroban environment.
+    /// * `caller`    - The buyer or seller who wishes to veto.
+    /// * `escrow_id` - The disputed escrow.
+    ///
+    /// # Errors
+    /// * `NotFound`                 - Escrow not found.
+    /// * `Unauthorized`             - Caller is neither buyer nor seller.
+    /// * `RecommendationNotPending` - No active evaluation exists.
+    /// * `RecommendationVetoed`     - Challenge window has already closed or
+    ///   the evaluation was already finalized / vetoed.
+    pub fn reject_dispute_recommendation(
+        env: Env,
+        caller: Address,
+        escrow_id: u64,
+    ) -> Result<(), Error> {
+        caller.require_auth();
+        Self::require_not_paused(&env, "reject_dispute_recommendation")?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::Data(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let escrow = EscrowContract::get_escrow(&env, escrow_id);
+        if caller != escrow.customer && caller != escrow.merchant {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+
+        let mut eval: DisputeRubricEvaluation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(DisputeKey::RubricEvaluation(escrow_id)))
+            .ok_or(Error::Action(ActionError::RecommendationNotPending))?;
+
+        // Cannot veto once finalized.
+        if eval.finalized {
+            return Err(Error::Action(ActionError::RecommendationVetoed));
+        }
+        // Cannot veto after the challenge window has closed.
+        let now = env.ledger().timestamp();
+        if now >= eval.challenge_window_ends_at {
+            return Err(Error::Action(ActionError::RecommendationVetoed));
+        }
+
+        // Record the veto on the correct side.
+        if caller == escrow.customer {
+            eval.buyer_vetoed = true;
+        } else {
+            eval.seller_vetoed = true;
+        }
+
+        env.storage().instance().set(
+            &DataKey::Dispute(DisputeKey::RubricEvaluation(escrow_id)),
+            &eval,
+        );
+
+        DisputeRubricVetoed {
+            escrow_id,
+            vetoed_by: caller,
+            vetoed_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Permissionlessly finalizes a rubric recommendation once both conditions
+    /// are met:
+    ///
+    /// 1. The challenge window (`challenge_window_ends_at`) has passed without
+    ///    either party vetoing.
+    /// 2. The evaluation's `confidence_bps >= fast_track_threshold_bps`.
+    ///
+    /// Funds are distributed proportionally according to
+    /// `recommended_buyer_bps` / `recommended_seller_bps`.
+    ///
+    /// # Arguments
+    /// * `env`       - Soroban environment.
+    /// * `escrow_id` - The disputed escrow to finalize.
+    ///
+    /// # Errors
+    /// * `NotFound`                 - Escrow not found.
+    /// * `RecommendationNotPending` - No evaluation stored for this escrow.
+    /// * `RecommendationVetoed`     - A party vetoed; use standard arbitration.
+    /// * `ChallengeWindowOpen`      - Challenge window has not yet elapsed.
+    /// * `ConfidenceBelowFastTrack` - Confidence is below the fast-track threshold.
+    pub fn finalize_recommended_resolution(env: Env, escrow_id: u64) -> Result<(), Error> {
+        Self::require_not_paused(&env, "finalize_recommended_resolution")?;
+
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Escrow(EscrowKey::Data(escrow_id)))
+        {
+            return Err(Error::Escrow(EscrowError::NotFound));
+        }
+        let mut escrow = EscrowContract::get_escrow(&env, escrow_id);
+
+        let mut eval: DisputeRubricEvaluation = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(DisputeKey::RubricEvaluation(escrow_id)))
+            .ok_or(Error::Action(ActionError::RecommendationNotPending))?;
+
+        // A vetoed evaluation must go through standard arbitration.
+        if eval.buyer_vetoed || eval.seller_vetoed {
+            return Err(Error::Action(ActionError::RecommendationVetoed));
+        }
+        // An already-finalized evaluation cannot be executed twice.
+        if eval.finalized {
+            return Err(Error::Action(ActionError::RecommendationNotPending));
+        }
+
+        let now = env.ledger().timestamp();
+        // Challenge window must have closed.
+        if now < eval.challenge_window_ends_at {
+            return Err(Error::Action(ActionError::ChallengeWindowOpen));
+        }
+
+        // Confidence must meet or exceed the fast-track threshold.
+        let threshold_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Dispute(DisputeKey::FastTrackThresholdBps))
+            .unwrap_or(9_000u32);
+        if eval.confidence_bps < threshold_bps {
+            return Err(Error::Action(ActionError::ConfidenceBelowFastTrack));
+        }
+
+        // ── CEI: mark finalized + update escrow status before any transfer ──
+        eval.finalized = true;
+        env.storage().instance().set(
+            &DataKey::Dispute(DisputeKey::RubricEvaluation(escrow_id)),
+            &eval,
+        );
+        Self::dequeue_escalation(&env, escrow_id);
+
+        // Split (integer truncation; any dust goes to seller).
+        let total = escrow.amount;
+        let buyer_amount = total * eval.recommended_buyer_bps as i128 / 10_000i128;
+        let seller_amount = total - buyer_amount;
+
+        // Status: if buyer gets 0 the whole amount went to seller → Released.
+        escrow.status = if buyer_amount == 0 {
+            EscrowStatus::Released
+        } else {
+            EscrowStatus::Resolved
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+
+        // ── Token transfers ───────────────────────────────────────────────
+        if buyer_amount > 0 {
+            EscrowContract::transfer_if_token_contract(
+                &env,
+                &escrow.token,
+                &escrow.customer,
+                buyer_amount,
+            )?;
+        }
+        if seller_amount > 0 {
+            EscrowContract::transfer_if_token_contract(
+                &env,
+                &escrow.token,
+                &escrow.merchant,
+                seller_amount,
+            )?;
+        }
+
+        DisputeRubricFinalized {
+            escrow_id,
+            buyer_amount,
+            seller_amount,
+            finalized_at: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
 
     /// Files a record or claim for an escrow.
     ///
