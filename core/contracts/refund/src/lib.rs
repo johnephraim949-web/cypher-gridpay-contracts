@@ -237,9 +237,21 @@ pub enum SystemKey {
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub enum EvidenceKey {
+    /// The latest item submitted by a party for a refund.
     Evidence(u64, Address),
+    /// Item `i` of a refund's evidence transcript, in submission order.
     EvidenceIndex(u64, u64),
     EvidenceCount(u64),
+    /// Rolling hash over the whole transcript.
+    ChainHead(u64),
+    /// The merchant's rebuttal deadline (set by the first InitialClaim).
+    RebuttalDeadline(u64),
+    /// Whether the merchant has submitted a rebuttal.
+    RebuttalSubmitted(u64),
+    /// Whether the merchant waived the rest of its rebuttal window.
+    RebuttalWaived(u64),
+    /// Rebuttal window and anti-sniping extension.
+    Config,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -289,6 +301,20 @@ pub enum RefundReasonCode {
     Unauthorized,
     CustomerRequest,
     Other,
+}
+
+/// Refund activity for one reason code in one 30-day epoch, for a merchant or
+/// platform-wide. `count` is refunds requested in the epoch; `approved_count`
+/// and `total_amount` are those of them that were paid out (attributed to
+/// the epoch the refund was requested in, so `approved_count <= count`).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EpochReasonCodeStats {
+    pub epoch_id: u32,
+    pub reason_code: RefundReasonCode,
+    pub count: u64,
+    pub total_amount: i128,
+    pub approved_count: u64,
 }
 
 // Issue #138 (recurred): the flat `Error` enum grew past Soroban's 50-variant
@@ -445,6 +471,21 @@ pub enum ExtError {
     TooManyTriggerConditions = 70,
     // Slash amount exceeds the arbitrator's deposited stake
     InsufficientArbitratorStake = 71,
+    // A refund's evidence transcript is full (MAX_EVIDENCE_ITEMS).
+    EvidenceLimitExceeded = 72,
+    // Evidence stage out of turn (no InitialClaim yet, or a surrebuttal
+    // before any rebuttal) or submitted by the wrong party for the stage.
+    EvidenceOutOfOrder = 73,
+    // The rebuttal window has closed; no more evidence is accepted.
+    EvidenceWindowClosed = 74,
+    // A denial or arbitration vote before the merchant's rebuttal deadline
+    // (and without a waiver).
+    RebuttalWindowOpen = 75,
+    // The same refund id appears more than once in a batch.
+    DuplicateBatchEntry = 76,
+    // The refund contract's balance of a token can't cover the batch's
+    // refunds in that token.
+    InsufficientBatchLiquidity = 77,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -592,17 +633,19 @@ pub struct RefundDeniedEvent {
     pub rejection_reason: String,
 }
 
+/// Emitted when a denied/appealed refund is escalated to the orchestrator's
+/// supreme council (#294). (Event names are limited to 32 characters.)
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AppealEscalatedToSupremeCouncilEvent {
+pub struct SupremeEscalationEvent {
     pub refund_id: u64,
     pub appellant: Address,
     pub amount: i128,
     pub escalated_at: u64,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppealFiledEvent {
     pub appeal_id: u64,
     pub refund_id: u64,
@@ -812,9 +855,54 @@ pub struct NotificationHook {
 pub struct RefundEvidence {
     pub refund_id: u64,
     pub submitter: Address,
-    pub evidence_hash: BytesN<32>,
+    pub stage: EvidenceStage,
+    /// Hash of the evidence content (kept off-chain).
+    pub content_hash: BytesN<32>,
+    /// `chain_hash` of the previous item (zero for the first).
+    pub prev_chain_hash: BytesN<32>,
+    /// `sha256(prev_chain_hash || xdr(submitter) || xdr(stage as u32) ||
+    /// content_hash || xdr(submitted_at))`.
+    pub chain_hash: BytesN<32>,
     pub submitted_at: u64,
 }
+
+/// Adversarial turn-taking: the customer's claim, the merchant's rebuttal,
+/// the customer's surrebuttal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[contracttype]
+#[repr(u32)]
+pub enum EvidenceStage {
+    InitialClaim = 0,
+    MerchantRebuttal = 1,
+    CustomerSurrebuttal = 2,
+}
+
+/// Rebuttal window granted to the merchant after the customer's first claim,
+/// and how much a last-minute customer submission extends it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct EvidenceConfig {
+    pub rebuttal_window_secs: u64,
+    pub rebuttal_extension_secs: u64,
+}
+
+/// Emitted for every evidence item.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EvidenceSubmitted {
+    pub refund_id: u64,
+    pub submitter: Address,
+    pub stage: EvidenceStage,
+    pub chain_hash: BytesN<32>,
+    pub rebuttal_deadline: u64,
+}
+
+/// Most evidence items per refund.
+pub const MAX_EVIDENCE_ITEMS: u64 = 12;
+/// Default merchant rebuttal window: 72 hours.
+pub const DEFAULT_REBUTTAL_WINDOW_SECS: u64 = 72 * 60 * 60;
+/// Default anti-sniping extension: 24 hours.
+pub const DEFAULT_REBUTTAL_EXTENSION_SECS: u64 = 24 * 60 * 60;
 
 // Issue #191: Multi-token refund support
 #[derive(Clone)]
@@ -1260,13 +1348,49 @@ pub struct RefundPolicyTemplateApplied {
 }
 
 // ── Issue #135: Batch refund result struct ─────────────────────────────────
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct BatchRefundResult {
     pub refund_id: u64,
     pub success: bool,
     pub error_code: u32,
     pub amount_refunded: i128,
+}
+
+/// Most refunds `batch_process_refunds` takes in one call, keeping it within
+/// Soroban's CPU and read/write-entry budgets.
+pub const MAX_BATCH_PROCESS_REFUNDS: u32 = 25;
+
+/// One processed refund in the coalesced payment-contract notification.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefundSyncEntry {
+    pub payment_id: u64,
+    pub refund_id: u64,
+    pub amount: i128,
+}
+
+/// What a batch paid out for one (merchant, token) group.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchGroupTotal {
+    pub merchant: Address,
+    pub token: Address,
+    pub processed_count: u32,
+    pub total_amount: i128,
+}
+
+/// Emitted once per `batch_process_refunds` call.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefundBatchProcessed {
+    pub atomic: bool,
+    pub processed_count: u32,
+    pub failed_count: u32,
+    pub groups: Vec<BatchGroupTotal>,
+    /// Whether the single `record_refund_batch` call to the configured
+    /// payment contract succeeded (false when none is configured).
+    pub payment_synced: bool,
 }
 
 #[derive(Clone)]
@@ -2316,6 +2440,8 @@ impl RefundContract {
         Self::require_not_paused(&env, "reject_refund")?;
         // Require admin authentication
         admin.require_auth();
+        // The merchant's guaranteed rebuttal window must have run.
+        Self::require_rebuttal_window_closed(&env, refund_id)?;
 
         Self::begin_refund_rejection(&env, admin, refund_id, rejection_reason)
     }
@@ -2705,9 +2831,11 @@ impl RefundContract {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
         refund.status = RefundStatus::EscalatedToSupremeCouncil;
-        Self::save_refund(&env, &refund);
+        env.storage()
+            .instance()
+            .set(&DataKey::Refund(refund_id), &refund);
 
-        (AppealEscalatedToSupremeCouncilEvent {
+        (SupremeEscalationEvent {
             refund_id,
             appellant,
             amount: refund.amount,
@@ -3700,6 +3828,8 @@ impl RefundContract {
         if arbitrator == refund.merchant || arbitrator == refund.customer {
             return Err(Error::Core(CoreError::Unauthorized));
         }
+        // No vote before the merchant's rebuttal deadline (or its waiver).
+        Self::require_rebuttal_window_closed(&env, case.refund_id)?;
 
         let vote = ArbitratorVote {
             arbitrator: arbitrator.clone(),
@@ -5517,7 +5647,7 @@ impl RefundContract {
                             pending_count += 1;
                             pending_amount += refund.amount;
                         }
-                        RefundStatus::PendingAppeal => {
+                        RefundStatus::PendingAppeal | RefundStatus::EscalatedToSupremeCouncil => {
                             pending_count += 1;
                             pending_amount += refund.amount;
                         }
@@ -5587,6 +5717,86 @@ impl RefundContract {
         }
 
         results
+    }
+
+    /// The analytics epoch a timestamp falls in (30-day epochs).
+    pub fn get_reason_epoch(_env: Env, timestamp: u64) -> u32 {
+        storage::reason_epoch(timestamp)
+    }
+
+    /// A merchant's refund activity in `epoch_id`, one entry per reason code
+    /// in a fixed order (zeroed where nothing happened). Reads exactly six
+    /// entries, however much history there is.
+    pub fn get_merchant_reason_analytics(
+        env: Env,
+        merchant: Address,
+        epoch_id: u32,
+    ) -> Vec<EpochReasonCodeStats> {
+        Self::epoch_reason_stats(&env, Some(merchant), epoch_id)
+    }
+
+    /// Platform-wide refund activity in `epoch_id`, one entry per reason code.
+    pub fn get_platform_reason_analytics(env: Env, epoch_id: u32) -> Vec<EpochReasonCodeStats> {
+        Self::epoch_reason_stats(&env, None, epoch_id)
+    }
+
+    fn epoch_reason_stats(
+        env: &Env,
+        merchant: Option<Address>,
+        epoch_id: u32,
+    ) -> Vec<EpochReasonCodeStats> {
+        let mut out = Vec::new(env);
+        for reason in storage::ALL_REASON_CODES {
+            out.push_back(storage::read_epoch_reason_stats(env, merchant.clone(), epoch_id, reason));
+        }
+        out
+    }
+
+    /// Epoch-over-epoch change in a merchant's requested refunds per reason
+    /// code, in basis points: `(current - prior) * 10_000 / prior`.
+    ///
+    /// A zero prior epoch (including `current_epoch == 0`, which has none) is
+    /// treated as a prior of one, so a reason appearing from nothing reports
+    /// `current * 10_000` instead of dividing by zero; zero in both epochs
+    /// is `0`. Reads twelve entries (six per epoch).
+    pub fn get_reason_code_velocity_delta(
+        env: Env,
+        merchant: Address,
+        current_epoch: u32,
+    ) -> Vec<(RefundReasonCode, i64)> {
+        let mut out = Vec::new(&env);
+        for reason in storage::ALL_REASON_CODES {
+            let current = storage::read_epoch_reason_stats(
+                &env,
+                Some(merchant.clone()),
+                current_epoch,
+                reason.clone(),
+            )
+            .count;
+            let prior = match current_epoch.checked_sub(1) {
+                Some(prior_epoch) => {
+                    storage::read_epoch_reason_stats(
+                        &env,
+                        Some(merchant.clone()),
+                        prior_epoch,
+                        reason.clone(),
+                    )
+                    .count
+                }
+                None => 0,
+            };
+            out.push_back((reason, Self::velocity_bps(current, prior)));
+        }
+        out
+    }
+
+    fn velocity_bps(current: u64, prior: u64) -> i64 {
+        let current = current.min(i64::MAX as u64 / 10_000) as i64;
+        let prior = prior.min(i64::MAX as u64 / 10_000) as i64;
+        if prior == 0 {
+            return current * 10_000;
+        }
+        (current - prior) * 10_000 / prior
     }
 
     /// Get analytics showing the count of refunds for each reason code, sorted by frequency,
@@ -6876,6 +7086,214 @@ impl RefundContract {
         results
     }
 
+    /// Process up to `MAX_BATCH_PROCESS_REFUNDS` approved refunds, grouped by
+    /// (merchant, token), with a liquidity check before any transfer.
+    ///
+    /// Refunds pay out of this contract's balance of each token. Before
+    /// anything moves, the amounts are summed per token and compared with
+    /// that balance (the gross amount, so fees only add headroom).
+    ///
+    /// * `atomic == true`: all or nothing. Any invalid item or a shortfall in
+    ///   any token returns an error, and the whole call is rolled back.
+    /// * `atomic == false`: items are paid in priority order. `Unauthorized`
+    ///   and `DuplicateCharge` go first, then `ProductDefect`, `NonDelivery`
+    ///   and `Other`, then `CustomerRequest`; ties keep input order. An item
+    ///   that no longer fits the remaining balance of its token fails with
+    ///   `InsufficientBatchLiquidity` while later, smaller ones may still fit.
+    ///
+    /// The payment contract (if configured) gets one coalesced
+    /// `record_refund_batch(Vec<RefundSyncEntry>)` call for the whole batch
+    /// instead of one per refund. The call is best effort: its outcome is
+    /// reported in the `RefundBatchProcessed` event and never undoes payouts.
+    ///
+    /// Results come back in input order.
+    ///
+    /// # Errors
+    /// `Unauthorized` (not the admin), `BatchRefundTooLarge`,
+    /// `DuplicateBatchEntry`; in atomic mode also the first item's error or
+    /// `InsufficientBatchLiquidity`.
+    pub fn batch_process_refunds(
+        env: Env,
+        admin: Address,
+        refund_ids: Vec<u64>,
+        atomic: bool,
+    ) -> Result<Vec<BatchRefundResult>, Error> {
+        Self::require_not_paused(&env, "batch_process_refunds")?;
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+
+        let len = refund_ids.len();
+        if len > MAX_BATCH_PROCESS_REFUNDS {
+            return Err(Error::Core(CoreError::BatchRefundTooLarge));
+        }
+        for i in 1..len {
+            let id = refund_ids.get_unchecked(i);
+            for j in 0..i {
+                if refund_ids.get_unchecked(j) == id {
+                    return Err(Error::Ext(ExtError::DuplicateBatchEntry));
+                }
+            }
+        }
+
+        let failure = |refund_id: u64, e: Error| BatchRefundResult {
+            refund_id,
+            success: false,
+            error_code: e.to_u32(),
+            amount_refunded: 0,
+        };
+
+        // Load and pre-validate; results start as failures and are
+        // overwritten on success.
+        let mut results: Vec<BatchRefundResult> = Vec::new(&env);
+        let mut eligible: Vec<(u32, u32)> = Vec::new(&env); // (priority, position)
+        let mut required: Map<Address, i128> = Map::new(&env);
+        let mut refunds: Map<u32, Refund> = Map::new(&env);
+        for pos in 0..len {
+            let refund_id = refund_ids.get_unchecked(pos);
+            let loaded = env
+                .storage()
+                .instance()
+                .get::<_, Refund>(&DataKey::Refund(refund_id))
+                .ok_or(Error::Core(CoreError::RefundNotFound))
+                .and_then(|r| {
+                    if r.status == RefundStatus::Approved {
+                        Ok(r)
+                    } else {
+                        Err(Error::Core(CoreError::InvalidStatus))
+                    }
+                });
+            match loaded {
+                Ok(refund) => {
+                    let total = required.get(refund.token.clone()).unwrap_or(0);
+                    required.set(refund.token.clone(), total.saturating_add(refund.amount));
+                    eligible.push_back((Self::batch_priority(&refund.reason_code), pos));
+                    refunds.set(pos, refund);
+                    results.push_back(failure(refund_id, Error::Core(CoreError::InvalidStatus)));
+                }
+                Err(e) if atomic => return Err(e),
+                Err(e) => results.push_back(failure(refund_id, e)),
+            }
+        }
+
+        // Liquidity available per token, read once.
+        let this = env.current_contract_address();
+        let mut available: Map<Address, i128> = Map::new(&env);
+        for (token_addr, needed) in required.iter() {
+            let balance = token::Client::new(&env, &token_addr).balance(&this);
+            if atomic && balance < needed {
+                return Err(Error::Ext(ExtError::InsufficientBatchLiquidity));
+            }
+            available.set(token_addr, balance);
+        }
+
+        // Atomic: input order. Otherwise by priority, then input order
+        // (insertion sort, n <= 25).
+        if !atomic {
+            for i in 1..eligible.len() {
+                let mut j = i;
+                while j > 0 && eligible.get_unchecked(j - 1) > eligible.get_unchecked(j) {
+                    let a = eligible.get_unchecked(j - 1);
+                    eligible.set(j - 1, eligible.get_unchecked(j));
+                    eligible.set(j, a);
+                    j -= 1;
+                }
+            }
+        }
+
+        let mut groups: Map<(Address, Address), (u32, i128)> = Map::new(&env);
+        let mut sync: Vec<RefundSyncEntry> = Vec::new(&env);
+        let (mut processed_count, mut failed_count) = (0u32, len - eligible.len());
+        for (_, pos) in eligible.iter() {
+            let refund = refunds.get_unchecked(pos);
+            let refund_id = refund_ids.get_unchecked(pos);
+            let remaining = available.get(refund.token.clone()).unwrap_or(0);
+            let outcome = if refund.amount > remaining {
+                Err(Error::Ext(ExtError::InsufficientBatchLiquidity))
+            } else {
+                Self::process_refund_internal(&env, admin.clone(), refund_id)
+            };
+            match outcome {
+                Ok(()) => {
+                    available.set(refund.token.clone(), remaining - refund.amount);
+                    let key = (refund.merchant.clone(), refund.token.clone());
+                    let (count, total) = groups.get(key.clone()).unwrap_or((0, 0));
+                    groups.set(key, (count + 1, total.saturating_add(refund.amount)));
+                    sync.push_back(RefundSyncEntry {
+                        payment_id: refund.payment_id,
+                        refund_id,
+                        amount: refund.amount,
+                    });
+                    results.set(
+                        pos,
+                        BatchRefundResult {
+                            refund_id,
+                            success: true,
+                            error_code: 0,
+                            amount_refunded: refund.amount,
+                        },
+                    );
+                    processed_count += 1;
+                }
+                Err(e) if atomic => return Err(e),
+                Err(e) => {
+                    results.set(pos, failure(refund_id, e));
+                    failed_count += 1;
+                }
+            }
+        }
+
+        // One coalesced accounting update for the whole batch.
+        let payment_contract: Option<Address> =
+            env.storage().instance().get(&DataKey::PaymentContractAddress);
+        let payment_synced = match payment_contract {
+            Some(payment_contract) if !sync.is_empty() => matches!(
+                env.try_invoke_contract::<(), soroban_sdk::InvokeError>(
+                    &payment_contract,
+                    &Symbol::new(&env, "record_refund_batch"),
+                    (sync,).into_val(&env),
+                ),
+                Ok(Ok(()))
+            ),
+            _ => false,
+        };
+
+        let mut group_totals = Vec::new(&env);
+        for ((merchant, token_addr), (count, total)) in groups.iter() {
+            group_totals.push_back(BatchGroupTotal {
+                merchant,
+                token: token_addr,
+                processed_count: count,
+                total_amount: total,
+            });
+        }
+        RefundBatchProcessed {
+            atomic,
+            processed_count,
+            failed_count,
+            groups: group_totals,
+            payment_synced,
+        }
+        .publish(&env);
+
+        Ok(results)
+    }
+
+    /// Payout priority under partial liquidity (lower goes first).
+    fn batch_priority(reason: &RefundReasonCode) -> u32 {
+        match reason {
+            RefundReasonCode::Unauthorized | RefundReasonCode::DuplicateCharge => 0,
+            RefundReasonCode::CustomerRequest => 2,
+            _ => 1,
+        }
+    }
+
     // ── Issue #143: Cross-contract payment verification ───────────────────────
 
     /// Set the address of the payment contract used for cross-contract ownership verification.
@@ -7086,7 +7504,9 @@ impl RefundContract {
             };
             let active = match refund.status {
                 RefundStatus::Requested => refund.expires_at.is_none_or(|exp| now < exp),
-                RefundStatus::Approved | RefundStatus::PendingAppeal => true,
+                RefundStatus::Approved
+                | RefundStatus::PendingAppeal
+                | RefundStatus::EscalatedToSupremeCouncil => true,
                 RefundStatus::Rejected
                 | RefundStatus::PermanentlyDenied
                 | RefundStatus::Processed => false,
@@ -7267,6 +7687,13 @@ impl RefundContract {
             .instance()
             .set(&DataKey::RefundCounter, &refund_id);
         Self::add_to_status_index(&env, initial_status.clone(), refund_id);
+        storage::record_epoch_reason_stats(
+            &env,
+            &merchant,
+            storage::reason_epoch(refund.requested_at),
+            &reason_code,
+            None,
+        );
 
         let merchant_count: u64 = env
             .storage()
@@ -7430,6 +7857,13 @@ impl RefundContract {
             .instance()
             .set(&DataKey::Refund(refund_id), &refund);
         Self::add_to_status_index(env, RefundStatus::Processed, refund_id);
+        storage::record_epoch_reason_stats(
+            env,
+            &refund.merchant,
+            storage::reason_epoch(refund.requested_at),
+            &refund.reason_code,
+            Some(refund.amount),
+        );
         // Issue #382: this refund's requested_at may fall within a previously
         // cached analytics window, so drop that cache entry.
         Self::invalidate_analytics_cache_for(env, refund.requested_at);
@@ -9901,24 +10335,30 @@ impl RefundContract {
 
     // ── Issue #190: Dispute evidence attachment ────────────────────────────
 
-    /// Submit evidence for a refund dispute as the customer or merchant.
+    /// Submit an evidence item for a refund dispute.
     ///
-    /// Each party (customer or merchant) can submit one evidence entry per refund.
+    /// Evidence is an ordered, hash-chained transcript with adversarial
+    /// turn-taking: the customer's `InitialClaim` comes first and opens the
+    /// merchant's rebuttal window (`rebuttal_window_secs`); the merchant may
+    /// then submit `MerchantRebuttal` items, and after a rebuttal the
+    /// customer may submit `CustomerSurrebuttal` items. Each item's
+    /// `chain_hash` covers the previous one, so the head digest
+    /// (`get_evidence_chain_head`) commits to the whole transcript in order.
     ///
-    /// # Arguments
-    /// * `submitter` - The address submitting the evidence (must be the customer or merchant).
-    /// * `refund_id` - The ID of the refund to submit evidence for.
-    /// * `evidence_hash` - SHA-256 hash of the evidence document.
+    /// Anti-sniping: a customer item submitted in the final 10% of the
+    /// rebuttal window pushes the deadline back by `rebuttal_extension_secs`.
+    /// Once the deadline has passed no more evidence is accepted. At most
+    /// `MAX_EVIDENCE_ITEMS` items per refund.
     ///
     /// # Errors
-    /// Returns `RefundNotFound` if the refund does not exist.
-    /// Returns `Unauthorized` if the submitter is not the customer or merchant.
-    /// Returns `EvidenceAlreadySubmitted` if this party has already submitted evidence.
+    /// `RefundNotFound`, `EvidenceOutOfOrder` (wrong turn, or the wrong
+    /// party for the stage), `EvidenceWindowClosed`, `EvidenceLimitExceeded`.
     pub fn submit_refund_evidence(
         env: Env,
         submitter: Address,
         refund_id: u64,
-        evidence_hash: BytesN<32>,
+        stage: EvidenceStage,
+        content_hash: BytesN<32>,
     ) -> Result<(), Error> {
         submitter.require_auth();
 
@@ -9928,53 +10368,216 @@ impl RefundContract {
             .get(&DataKey::Refund(refund_id))
             .ok_or(Error::Core(CoreError::RefundNotFound))?;
 
+        let expected_party = match stage {
+            EvidenceStage::InitialClaim | EvidenceStage::CustomerSurrebuttal => &refund.customer,
+            EvidenceStage::MerchantRebuttal => &refund.merchant,
+        };
         if submitter != refund.customer && submitter != refund.merchant {
             return Err(Error::Core(CoreError::Unauthorized));
         }
-
-        if env
-            .storage()
-            .instance()
-            .has(&EvidenceKey::Evidence(refund_id, submitter.clone()))
-        {
-            return Err(Error::Ext(ExtError::EvidenceAlreadySubmitted));
+        if &submitter != expected_party {
+            return Err(Error::Ext(ExtError::EvidenceOutOfOrder));
         }
 
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&EvidenceKey::EvidenceCount(refund_id))
-            .unwrap_or(0);
+        let instance = env.storage().instance();
+        let count: u64 = instance.get(&EvidenceKey::EvidenceCount(refund_id)).unwrap_or(0);
+        if count >= MAX_EVIDENCE_ITEMS {
+            return Err(Error::Ext(ExtError::EvidenceLimitExceeded));
+        }
+
+        let now = env.ledger().timestamp();
+        let config = Self::get_evidence_config(env.clone());
+        let existing_deadline: Option<u64> = instance.get(&EvidenceKey::RebuttalDeadline(refund_id));
+        let deadline = match (existing_deadline, stage) {
+            // The first claim opens the merchant's rebuttal window.
+            (None, EvidenceStage::InitialClaim) => now.saturating_add(config.rebuttal_window_secs),
+            (None, _) => return Err(Error::Ext(ExtError::EvidenceOutOfOrder)),
+            (Some(deadline), _) => {
+                if now > deadline {
+                    return Err(Error::Ext(ExtError::EvidenceWindowClosed));
+                }
+                if stage == EvidenceStage::CustomerSurrebuttal
+                    && !instance
+                        .get::<_, bool>(&EvidenceKey::RebuttalSubmitted(refund_id))
+                        .unwrap_or(false)
+                {
+                    return Err(Error::Ext(ExtError::EvidenceOutOfOrder));
+                }
+                // Anti-sniping: customer evidence in the last 10% of the
+                // window gives the merchant extra time to respond.
+                let final_stretch = config.rebuttal_window_secs / 10;
+                if submitter == refund.customer && now >= deadline.saturating_sub(final_stretch) {
+                    deadline.saturating_add(config.rebuttal_extension_secs)
+                } else {
+                    deadline
+                }
+            }
+        };
+
+        let prev_chain_hash: BytesN<32> = instance
+            .get(&EvidenceKey::ChainHead(refund_id))
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]));
+        let chain_hash =
+            Self::evidence_chain_hash(&env, &prev_chain_hash, &submitter, stage, &content_hash, now);
 
         let evidence = RefundEvidence {
             refund_id,
             submitter: submitter.clone(),
-            evidence_hash,
-            submitted_at: env.ledger().timestamp(),
+            stage,
+            content_hash,
+            prev_chain_hash,
+            chain_hash: chain_hash.clone(),
+            submitted_at: now,
         };
+        instance.set(&EvidenceKey::EvidenceIndex(refund_id, count), &evidence);
+        instance.set(&EvidenceKey::Evidence(refund_id, submitter.clone()), &evidence);
+        instance.set(&EvidenceKey::EvidenceCount(refund_id), &(count + 1));
+        instance.set(&EvidenceKey::ChainHead(refund_id), &chain_hash);
+        instance.set(&EvidenceKey::RebuttalDeadline(refund_id), &deadline);
+        if stage == EvidenceStage::MerchantRebuttal {
+            instance.set(&EvidenceKey::RebuttalSubmitted(refund_id), &true);
+        }
 
-        env.storage().instance().set(
-            &EvidenceKey::Evidence(refund_id, submitter.clone()),
-            &evidence,
-        );
-        env.storage()
-            .instance()
-            .set(&EvidenceKey::EvidenceIndex(refund_id, count), &submitter);
-        env.storage()
-            .instance()
-            .set(&EvidenceKey::EvidenceCount(refund_id), &(count + 1));
-
+        EvidenceSubmitted {
+            refund_id,
+            submitter,
+            stage,
+            chain_hash,
+            rebuttal_deadline: deadline,
+        }
+        .publish(&env);
         Ok(())
     }
 
-    /// Get the evidence submitted by a specific party for a refund dispute.
-    ///
-    /// # Arguments
-    /// * `refund_id` - The ID of the refund.
-    /// * `submitter` - The address of the party who submitted the evidence.
-    ///
-    /// # Returns
-    /// The `RefundEvidence` if found, `None` otherwise.
+    /// `sha256(prev || xdr(submitter) || xdr(stage as u32) || content_hash ||
+    /// xdr(submitted_at))`.
+    fn evidence_chain_hash(
+        env: &Env,
+        prev: &BytesN<32>,
+        submitter: &Address,
+        stage: EvidenceStage,
+        content_hash: &BytesN<32>,
+        submitted_at: u64,
+    ) -> BytesN<32> {
+        use soroban_sdk::xdr::ToXdr;
+        let mut pre = Bytes::from(prev.clone());
+        pre.append(&submitter.clone().to_xdr(env));
+        pre.append(&(stage as u32).to_xdr(env));
+        pre.append(&Bytes::from(content_hash.clone()));
+        pre.append(&submitted_at.to_xdr(env));
+        env.crypto().sha256(&pre).to_bytes()
+    }
+
+    /// The digest committing to a refund's whole evidence transcript, in
+    /// order (zero when there is none).
+    pub fn get_evidence_chain_head(env: Env, refund_id: u64) -> BytesN<32> {
+        env.storage()
+            .instance()
+            .get(&EvidenceKey::ChainHead(refund_id))
+            .unwrap_or_else(|| BytesN::from_array(&env, &[0u8; 32]))
+    }
+
+    /// Recomputes the chain from the stored items and checks every link and
+    /// the head: true if the transcript is intact.
+    pub fn verify_evidence_chain(env: Env, refund_id: u64) -> bool {
+        let mut prev = BytesN::from_array(&env, &[0u8; 32]);
+        for item in Self::get_all_refund_evidence(env.clone(), refund_id).iter() {
+            let expected = Self::evidence_chain_hash(
+                &env,
+                &prev,
+                &item.submitter,
+                item.stage,
+                &item.content_hash,
+                item.submitted_at,
+            );
+            if item.prev_chain_hash != prev || item.chain_hash != expected {
+                return false;
+            }
+            prev = expected;
+        }
+        prev == Self::get_evidence_chain_head(env, refund_id)
+    }
+
+    /// The merchant's rebuttal deadline, once a claim has opened it.
+    pub fn get_rebuttal_deadline(env: Env, refund_id: u64) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&EvidenceKey::RebuttalDeadline(refund_id))
+    }
+
+    /// The merchant gives up the rest of its rebuttal window, letting a
+    /// denial or arbitration vote proceed immediately.
+    pub fn waive_rebuttal(env: Env, merchant: Address, refund_id: u64) -> Result<(), Error> {
+        merchant.require_auth();
+        let refund: Refund = env
+            .storage()
+            .instance()
+            .get(&DataKey::Refund(refund_id))
+            .ok_or(Error::Core(CoreError::RefundNotFound))?;
+        if merchant != refund.merchant {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        env.storage()
+            .instance()
+            .set(&EvidenceKey::RebuttalWaived(refund_id), &true);
+        Ok(())
+    }
+
+    /// Sets the rebuttal window and anti-sniping extension. Admin only.
+    pub fn set_evidence_config(
+        env: Env,
+        admin: Address,
+        config: EvidenceConfig,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Core(CoreError::Unauthorized))?;
+        if admin != stored_admin {
+            return Err(Error::Core(CoreError::Unauthorized));
+        }
+        if config.rebuttal_window_secs == 0 {
+            return Err(Error::Core(CoreError::InvalidAmount));
+        }
+        env.storage().instance().set(&EvidenceKey::Config, &config);
+        Ok(())
+    }
+
+    /// The evidence configuration (defaults: 72 h window, 24 h extension).
+    pub fn get_evidence_config(env: Env) -> EvidenceConfig {
+        env.storage()
+            .instance()
+            .get(&EvidenceKey::Config)
+            .unwrap_or(EvidenceConfig {
+                rebuttal_window_secs: DEFAULT_REBUTTAL_WINDOW_SECS,
+                rebuttal_extension_secs: DEFAULT_REBUTTAL_EXTENSION_SECS,
+            })
+    }
+
+    /// Blocks a denial or arbitration vote while the merchant's rebuttal
+    /// window is open, unless the merchant waived it. Refunds without a
+    /// customer claim are not affected.
+    fn require_rebuttal_window_closed(env: &Env, refund_id: u64) -> Result<(), Error> {
+        let deadline: Option<u64> = env
+            .storage()
+            .instance()
+            .get(&EvidenceKey::RebuttalDeadline(refund_id));
+        let waived: bool = env
+            .storage()
+            .instance()
+            .get(&EvidenceKey::RebuttalWaived(refund_id))
+            .unwrap_or(false);
+        match deadline {
+            Some(deadline) if !waived && env.ledger().timestamp() < deadline => {
+                Err(Error::Ext(ExtError::RebuttalWindowOpen))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Get the latest evidence item submitted by a party for a refund.
     pub fn get_refund_evidence(
         env: Env,
         refund_id: u64,
@@ -9985,13 +10588,7 @@ impl RefundContract {
             .get(&EvidenceKey::Evidence(refund_id, submitter))
     }
 
-    /// Get all evidence entries submitted for a refund dispute.
-    ///
-    /// # Arguments
-    /// * `refund_id` - The ID of the refund.
-    ///
-    /// # Returns
-    /// A vector of all `RefundEvidence` entries for the refund.
+    /// The refund's evidence transcript, in submission order.
     pub fn get_all_refund_evidence(env: Env, refund_id: u64) -> Vec<RefundEvidence> {
         let count: u64 = env
             .storage()
@@ -9999,22 +10596,14 @@ impl RefundContract {
             .get(&EvidenceKey::EvidenceCount(refund_id))
             .unwrap_or(0);
         let mut results = Vec::new(&env);
-        let mut i = 0u64;
-        while i < count {
-            if let Some(submitter) = env
+        for i in 0..count {
+            if let Some(item) = env
                 .storage()
                 .instance()
-                .get::<_, Address>(&EvidenceKey::EvidenceIndex(refund_id, i))
+                .get::<_, RefundEvidence>(&EvidenceKey::EvidenceIndex(refund_id, i))
             {
-                if let Some(ev) = env
-                    .storage()
-                    .instance()
-                    .get::<_, RefundEvidence>(&EvidenceKey::Evidence(refund_id, submitter))
-                {
-                    results.push_back(ev);
-                }
+                results.push_back(item);
             }
-            i += 1;
         }
         results
     }
@@ -11076,3 +11665,6 @@ mod test_admin_rotation;
 
 #[cfg(test)]
 mod test_refund_events;
+
+#[cfg(test)]
+mod test_refund_analytics;
