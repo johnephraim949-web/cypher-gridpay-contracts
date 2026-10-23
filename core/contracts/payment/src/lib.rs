@@ -10,9 +10,16 @@ use soroban_sdk::{
     Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
 };
 
+pub mod reentrancy;
 pub mod storage;
+use storage::StorageTier;
 #[path = "../../escrow/src/fixed_math.rs"]
 pub mod fixed_math;
+mod archival;
+mod finality;
+mod reconciliation;
+pub use archival::{ArchivalConfig, CompactArchivedPayment};
+pub use finality::{FinalityFlag, FinalityRiskConfig};
 
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
@@ -184,6 +191,12 @@ pub enum BasicError {
     // Issue #88: a data migration step failed, so the schema version must
     // not be bumped (the whole transaction is reverted).
     SchemaMigrationFailed = 127,
+    /// A merchant's aggregate volume for the day would exceed its verification
+    /// tier limit (#23).
+    DailyTierLimitExceeded = 128,
+    /// A fund-moving entry point was entered while another was still running
+    /// (see reentrancy.rs).
+    ReentrantCallDetected = 129,
 }
 
 /// Errors relating to payment lifecycle, settlement, and scheduling.
@@ -466,7 +479,7 @@ impl TryFrom<soroban_sdk::Error> for Error {
             if code >= 200 && code <= 229 {
                 return Ok(Error::Payment(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 100 && code <= 127 {
+            if code >= 100 && code <= 129 {
                 return Ok(Error::Basic(unsafe { core::mem::transmute(code) }));
             }
         }
@@ -571,7 +584,7 @@ pub struct PayoutSchedule {
     pub accumulated: i128,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[contracttype]
 pub enum PaymentStatus {
     Pending,
@@ -1999,6 +2012,12 @@ pub struct PaymentInvoice {
     pub issued_at: u64,
 }
 
+/// After a pending payment's expiry, how long it can still be disputed or
+/// refunded; its storage must last at least this much longer.
+pub const PAYMENT_DISPUTE_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
+/// Most ids `batch_bump_critical` accepts per call.
+pub const MAX_TTL_BUMP_BATCH: u32 = 50;
+
 #[contract]
 pub struct PaymentContract;
 
@@ -2079,6 +2098,62 @@ impl PaymentContract {
         (AdminAdded { admin }).publish(&env);
     }
 
+    /// Keeper maintenance (the issue's `batch_bump_critical_escrows_and_payments`;
+    /// Soroban caps contract function names at 32 characters): extends storage
+    /// for every payment in `ids` that still holds funds (`Pending`) so it
+    /// outlives the payment's expiry plus the dispute grace period. Unknown and
+    /// finished payments are skipped. Anyone may call it; it only extends TTLs.
+    ///
+    /// Returns how many payments were critical and bumped.
+    ///
+    /// # Errors
+    /// `InvalidBatchSize` for more than [`MAX_TTL_BUMP_BATCH`] ids.
+    pub fn batch_bump_critical(env: Env, ids: Vec<u64>) -> Result<u32, Error> {
+        if ids.len() > MAX_TTL_BUMP_BATCH {
+            return Err(Error::Basic(BasicError::InvalidBatchSize));
+        }
+        let mut bumped = 0u32;
+        for payment_id in ids.iter() {
+            if Self::keep_payment_alive(&env, payment_id) > 0 {
+                bumped += 1;
+            }
+        }
+        Ok(bumped)
+    }
+
+    /// Storage tier of a payment: `Pending` holds funds
+    /// (`CriticalActiveLock`), a partial refund is still live
+    /// (`StandardActive`), the rest are finished (`TerminalAuditRecord`).
+    fn payment_storage_tier(status: &PaymentStatus) -> StorageTier {
+        match status {
+            PaymentStatus::Pending => StorageTier::CriticalActiveLock,
+            PaymentStatus::PartialRefunded => StorageTier::StandardActive,
+            PaymentStatus::Completed | PaymentStatus::Refunded | PaymentStatus::Cancelled => {
+                StorageTier::TerminalAuditRecord
+            }
+        }
+    }
+
+    /// Payments are kept in instance storage, which shares one TTL. For a
+    /// payment that still holds funds, extend that TTL so it outlives the
+    /// payment's expiry plus [`PAYMENT_DISPUTE_GRACE_SECS`]. Returns the TTL
+    /// target, or 0 when the payment is unknown or not critical.
+    fn keep_payment_alive(env: &Env, payment_id: u64) -> u32 {
+        let payment: Payment = match env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::Data(payment_id)))
+        {
+            Some(payment) => payment,
+            None => return 0,
+        };
+        let tier = Self::payment_storage_tier(&payment.status);
+        if tier != StorageTier::CriticalActiveLock {
+            return 0;
+        }
+        storage::extend_instance_until(env, tier, payment.expires_at, PAYMENT_DISPUTE_GRACE_SECS)
+    }
+
     /// Returns the current schema version of the contract storage.
     ///
     /// # Returns
@@ -2131,6 +2206,189 @@ impl PaymentContract {
             .instance()
             .set(&DataKey::Config(ConfigKey::SchemaVersion), &target_version);
         Ok(())
+    }
+
+    /// Runs the data transformations registered for every schema version step
+    /// between `from_version` (exclusive) and `to_version` (inclusive).
+    ///
+    /// # Arguments
+    /// * `from_version` - The currently stored schema version.
+    /// * `to_version` - The requested schema version.
+    ///
+    /// # Returns
+    /// `Ok(())` when all steps completed, or `SchemaMigrationFailed` if any
+    /// entry could not be transformed (in which case the caller reverts).
+    fn run_data_migrations(env: &Env, from_version: u32, to_version: u32) -> Result<(), Error> {
+        let mut version = from_version;
+        while version < to_version {
+            let next_version = version + 1;
+            // v2: every stored payment must be reachable through the customer
+            // index, the merchant index and the paged merchant index. Versions
+            // without a registered data transformation are no-ops.
+            if next_version == 2 {
+                Self::migrate_v1_to_v2(env)?;
+            }
+            version = next_version;
+        }
+        Ok(())
+    }
+
+    /// v1 -> v2 data migration: backfills the per-customer and per-merchant
+    /// payment indexes for payments stored before those indexes existed.
+    ///
+    /// # Returns
+    /// `Ok(())` when every payment in `1..=PaymentKey::Counter` could be read
+    /// and indexed, otherwise `SchemaMigrationFailed`.
+    fn migrate_v1_to_v2(env: &Env) -> Result<(), Error> {
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::Counter))
+            .unwrap_or(0);
+
+        for payment_id in 1..=counter {
+            let payment: Payment = env
+                .storage()
+                .instance()
+                .get(&DataKey::Payment(PaymentKey::Data(payment_id)))
+                .ok_or(Error::Basic(BasicError::SchemaMigrationFailed))?;
+
+            // Corrupted record: the id and the indexed party must agree.
+            if payment.id != payment_id {
+                return Err(Error::Basic(BasicError::SchemaMigrationFailed));
+            }
+
+            Self::index_payment_for_customer(env, &payment.customer, payment_id);
+            Self::index_payment_for_merchant(env, &payment.merchant, payment_id);
+        }
+
+        Ok(())
+    }
+
+    /// Appends `payment_id` to the customer's payment index when missing.
+    fn index_payment_for_customer(env: &Env, customer: &Address, payment_id: u64) {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Customer(CustomerDataKey::PaymentCount(
+                customer.clone(),
+            )))
+            .unwrap_or(0);
+        if Self::index_contains(
+            env,
+            count,
+            |index| DataKey::Customer(CustomerDataKey::Payments(customer.clone(), index)),
+            payment_id,
+        ) {
+            return;
+        }
+        env.storage().instance().set(
+            &DataKey::Customer(CustomerDataKey::Payments(customer.clone(), count)),
+            &payment_id,
+        );
+        env.storage().instance().set(
+            &DataKey::Customer(CustomerDataKey::PaymentCount(customer.clone())),
+            &(count + 1),
+        );
+    }
+
+    /// Appends `payment_id` to the merchant's flat and paged payment indexes
+    /// when missing.
+    fn index_payment_for_merchant(env: &Env, merchant: &Address, payment_id: u64) {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::PaymentCount(
+                merchant.clone(),
+            )))
+            .unwrap_or(0);
+        if !Self::index_contains(
+            env,
+            count,
+            |index| DataKey::Merchant(MerchantDataKey::Payments(merchant.clone(), index)),
+            payment_id,
+        ) {
+            env.storage().instance().set(
+                &DataKey::Merchant(MerchantDataKey::Payments(merchant.clone(), count)),
+                &payment_id,
+            );
+            env.storage().instance().set(
+                &DataKey::Merchant(MerchantDataKey::PaymentCount(merchant.clone())),
+                &(count + 1),
+            );
+        }
+        Self::index_payment_in_merchant_page(env, merchant, payment_id);
+    }
+
+    /// Number of payment ids stored per paged merchant index page.
+    const MERCHANT_PAYMENT_PAGE_SIZE: u64 = 100;
+
+    /// Appends `payment_id` to the merchant's paged payment index, starting a
+    /// new page when the current one is full.
+    fn index_payment_in_merchant_page(env: &Env, merchant: &Address, payment_id: u64) {
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::PaymentCount(
+                merchant.clone(),
+            )))
+            .unwrap_or(0);
+        let last_page = if total == 0 {
+            0
+        } else {
+            (total - 1) / Self::MERCHANT_PAYMENT_PAGE_SIZE
+        };
+        let mut page: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                merchant.clone(),
+                last_page,
+            )))
+            .unwrap_or_else(|| Vec::new(env));
+
+        for i in 0..page.len() {
+            if page.get(i) == Some(payment_id) {
+                return;
+            }
+        }
+
+        if page.len() as u64 >= Self::MERCHANT_PAYMENT_PAGE_SIZE {
+            page = Vec::new(env);
+            env.storage().instance().set(
+                &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                    merchant.clone(),
+                    last_page + 1,
+                )),
+                &page,
+            );
+        }
+        page.push_back(payment_id);
+        env.storage().instance().set(
+            &DataKey::Merchant(MerchantDataKey::MerchantPaymentsPage(
+                merchant.clone(),
+                last_page,
+            )),
+            &page,
+        );
+    }
+
+    /// Returns `true` when `payment_id` is already stored in one of the `count`
+    /// slots addressed by `key_at`.
+    fn index_contains<F>(env: &Env, count: u64, key_at: F, payment_id: u64) -> bool
+    where
+        F: Fn(u64) -> DataKey,
+    {
+        if count == 0 {
+            return false;
+        }
+        // Healthy indexes are append-only, so the newest slot is checked first.
+        for index in (0..count).rev() {
+            if env.storage().instance().get::<DataKey, u64>(&key_at(index)) == Some(payment_id) {
+                return true;
+            }
+        }
+        false
     }
 
     /// Simulates a schema migration and returns an impact report without
@@ -2702,6 +2960,7 @@ impl PaymentContract {
         amount: i128,
         scheduled_at: u64,
     ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "schedule_payment")?;
         customer.require_auth();
         if amount <= 0 {
@@ -2748,6 +3007,9 @@ impl PaymentContract {
             amount,
         })
         .publish(&env);
+
+        // Funds are now held: storage must outlive the payment's deadline.
+        Self::keep_payment_alive(&env, payment_id);
 
         Ok(payment_id)
     }
@@ -2809,6 +3071,7 @@ impl PaymentContract {
         caller: Address,
         payment_id: u64,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "cancel_scheduled_payment")?;
         caller.require_auth();
         let mut scheduled: ScheduledPayment = env
@@ -2950,6 +3213,7 @@ impl PaymentContract {
     /// `Ok(())` on success, or an error if the payout schedule is not found, the payout
     /// period has not elapsed, or there is nothing to settle.
     pub fn trigger_scheduled_payout(env: Env, merchant: Address) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         merchant.require_auth();
         let mut schedule: PayoutSchedule = env
             .storage()
@@ -3342,6 +3606,9 @@ impl PaymentContract {
         })
         .publish(&env);
 
+        // Funds are now held: storage must outlive the payment's deadline.
+        Self::keep_payment_alive(&env, payment_id);
+
         Ok(payment_id)
     }
 
@@ -3477,6 +3744,7 @@ impl PaymentContract {
         metadata: String,
         auto_release_on_complete: bool,
     ) -> Result<(u64, u64), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "create_escrowed_payment")?;
         Self::require_merchant_not_paused(&env, &merchant)?;
         let payment_id = PaymentContract::create_payment(
@@ -3521,6 +3789,9 @@ impl PaymentContract {
             escrow_contract,
         })
         .publish(&env);
+
+        // Funds are now held: storage must outlive the payment's deadline.
+        Self::keep_payment_alive(&env, payment_id);
 
         Ok((payment_id, escrow_id))
     }
@@ -3570,14 +3841,18 @@ impl PaymentContract {
         // bridge and allow an immediate release. See
         // EscrowContract::add_trusted_bridge / is_trusted_bridge.
         let escrow_client = EscrowContractClient::new(&env, &bridge.escrow_contract);
-        if escrow_client
-            .try_release_escrow(
-                &env.current_contract_address(),
-                &bridge.escrow_id,
-                &bridge.auto_release_on_complete,
-            )
-            .is_err()
-        {
+        // Only the registered escrow sibling may call back while it runs.
+        reentrancy::expect_callback(
+            &env,
+            reentrancy::CallContextState::AwaitingEscrowCallback(bridge.escrow_contract.clone()),
+        );
+        let released = escrow_client.try_release_escrow(
+            &env.current_contract_address(),
+            &bridge.escrow_id,
+            &bridge.auto_release_on_complete,
+        );
+        reentrancy::end_callback(&env);
+        if released.is_err() {
             return Err(Error::Feature(FeatureError::EscrowBridgeFailed));
         }
 
@@ -4015,6 +4290,7 @@ impl PaymentContract {
     /// `Ok(())` on success, or an error if the payment is not found, is not in Pending
     /// status, has no expiration set, or has not yet expired.
     pub fn expire_payment(env: Env, payment_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         // Retrieve payment from storage
         if !env
             .storage()
@@ -4098,6 +4374,7 @@ impl PaymentContract {
     /// found, is not in Pending status, is expired, or the multisig threshold is not met.
     /// Returns `ProposalError::RequiresMultiSig` if a multisig proposal was auto-created.
     pub fn complete_payment(env: Env, admin: Address, payment_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "complete_payment")?;
         admin.require_auth();
 
@@ -4810,6 +5087,7 @@ impl PaymentContract {
         payment_id: u64,
         amount: i128,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "pay_installment")?;
         customer.require_auth();
 
@@ -5318,6 +5596,7 @@ impl PaymentContract {
     /// `Ok(())` on success, or an error if the payment is not found, is not in Pending
     /// status, or the caller is not the customer or merchant.
     pub fn cancel_payment(env: Env, caller: Address, payment_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "cancel_payment")?;
         caller.require_auth();
         PaymentContract::do_cancel_payment(&env, caller, payment_id)
@@ -6209,6 +6488,7 @@ impl PaymentContract {
     /// Anyone (typically an off-chain keeper / cron) may call this once the
     /// payment is due. It handles retry logic internally.
     pub fn execute_recurring_payment(env: Env, subscription_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         if !env
             .storage()
             .instance()
@@ -6671,6 +6951,7 @@ impl PaymentContract {
     /// - `MeteredNotFound` if the subscription does not exist.
     /// - `BillingOverflow` if the multiplication of units × price overflows.
     pub fn execute_metered_billing(env: Env, subscription_id: u64) -> Result<i128, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         let mut sub: MeteredSubscription = env
             .storage()
             .instance()
@@ -6853,6 +7134,7 @@ impl PaymentContract {
         customer: Address,
         subscription_id: u64,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         customer.require_auth();
 
         if !env
@@ -7102,6 +7384,7 @@ impl PaymentContract {
     /// Retry a failed payment for a subscription in dunning.
     /// Validates that the retry is due before attempting.
     pub fn retry_failed_payment(env: Env, subscription_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         if !env
             .storage()
             .instance()
@@ -7234,6 +7517,7 @@ impl PaymentContract {
 
     /// Admin resolves dunning for a subscription, returning it to active state.
     pub fn resolve_dunning(env: Env, admin: Address, subscription_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
 
         let config: MultiSigConfig = env
@@ -8244,6 +8528,7 @@ impl PaymentContract {
             PaymentContract::risk_surcharge_bps(&env, &customer, amount, &currency);
         let effective_bps = (config.fee_bps as u64 + risk_surcharge_bps as u64).min(1000u64) as u32;
         let fee = PaymentContract::compute_fee_amount(
+            &env,
             amount,
             effective_bps,
             &record.fee_tier,
@@ -8342,6 +8627,7 @@ impl PaymentContract {
 
     /// Admin withdraws accumulated fees to the treasury address.
     pub fn withdraw_fees(env: Env, admin: Address, amount: i128) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
         let multisig: MultiSigConfig = env
             .storage()
@@ -8416,6 +8702,7 @@ impl PaymentContract {
             PaymentContract::risk_surcharge_bps(env, customer, amount, &currency);
         let effective_bps = (config.fee_bps as u64 + risk_surcharge_bps as u64).min(1000u64) as u32;
         let fee = PaymentContract::compute_fee_amount(
+            env,
             amount,
             effective_bps,
             &record.fee_tier,
@@ -8482,6 +8769,7 @@ impl PaymentContract {
     /// Computes the fee amount applying the tier discount, adding the
     /// risk-based surcharge, then clamping to min/max.
     fn compute_fee_amount(
+        env: &Env,
         amount: i128,
         fee_bps: u32,
         tier: &FeeTier,
@@ -9108,6 +9396,7 @@ impl PaymentContract {
     /// - `RebateThresholdNotMet` if no accrual data exists for the merchant.
     /// - `RebateAlreadyClaimed` if the accrued rebate is zero (already claimed).
     pub fn claim_fee_rebate(env: Env, merchant: Address) -> Result<i128, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         merchant.require_auth();
 
         let config: FeeRebateConfig = env
@@ -9427,6 +9716,7 @@ impl PaymentContract {
         admin: Address,
         entries: Vec<BatchPaymentEntry>,
     ) -> Result<Vec<BatchResult>, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "create_payment_batch_optimized")?;
         admin.require_auth();
 
@@ -9819,6 +10109,9 @@ impl PaymentContract {
             condition_type: condition_type_str,
         })
         .publish(&env);
+
+        // Funds are now held: storage must outlive the payment's deadline.
+        Self::keep_payment_alive(&env, payment_id);
 
         Ok(payment_id)
     }
@@ -11866,6 +12159,7 @@ impl PaymentContract {
         expires_at: u64,
         customer_pk: BytesN<32>,
     ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "open_channel")?;
         Self::require_merchant_not_paused(&env, &merchant)?;
         customer.require_auth();
@@ -11946,6 +12240,7 @@ impl PaymentContract {
         channel_id: u64,
         amount: i128,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "top_up_channel")?;
         customer.require_auth();
         if amount <= 0 {
@@ -12016,6 +12311,7 @@ impl PaymentContract {
         nonce: u64,
         signature: BytesN<64>,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "settle_channel")?;
 
         let mut channel: PaymentChannel = env
@@ -12111,6 +12407,7 @@ impl PaymentContract {
     /// Returns an error if the caller is not a channel participant, the channel
     /// is not found, already closed, or not yet expired.
     pub fn close_channel_expired(env: Env, caller: Address, channel_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "close_channel_expired")?;
         caller.require_auth();
 
@@ -12226,6 +12523,7 @@ impl PaymentContract {
         token: Address,
         recipients: Vec<SplitRecipient>,
     ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_merchant_not_paused(&env, &merchant)?;
         customer.require_auth();
 
@@ -12500,6 +12798,9 @@ impl PaymentContract {
         })
         .publish(&env);
 
+        // Funds are now held: storage must outlive the payment's deadline.
+        Self::keep_payment_alive(&env, payment_id);
+
         Ok(payment_id)
     }
 
@@ -12523,6 +12824,7 @@ impl PaymentContract {
         admin: Address,
         payment_id: u64,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
 
         let mut config: PaymentSplitConfig = env
@@ -12662,6 +12964,16 @@ impl PaymentContract {
     /// # Errors
     /// Returns an error if the caller is not an admin, the sweep recipient
     /// is not set, the fee config is missing, or there are no fees to sweep.
+    pub fn sweep_platform_fees(env: Env, admin: Address) -> Result<i128, Error> {
+        let accumulated: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::AccumulatedFees))
+            .unwrap_or(0);
+        let amount = if accumulated > 0 { accumulated } else { 0 };
+        Self::sweep_fees(env, admin, amount)
+    }
+
     /// Sweeps up to `sweep_amount` of accumulated platform fees to the configured recipient.
     ///
     /// # Arguments
@@ -12676,6 +12988,7 @@ impl PaymentContract {
     /// is not set, accumulated fees are empty, `sweep_amount` exceeds accumulated fees,
     /// or multisig approval is required for amounts above threshold.
     pub fn sweep_fees(env: Env, admin: Address, sweep_amount: i128) -> Result<i128, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
         let config: MultiSigConfig = env
             .storage()
@@ -12699,25 +13012,17 @@ impl PaymentContract {
             return Err(Error::Feature(FeatureError::NothingToSweep));
         }
 
-        // Issue #111: Mathematical assertion — sweep amount must never exceed accumulated fees.
-        let sweep_amount: i128 = accumulated;
-        assert!(
-            sweep_amount <= accumulated,
-            "sweep_amount ({}) exceeds accumulated_fees ({})",
-            sweep_amount,
-            accumulated
-        );
+        // Issue #111: the swept amount must be positive and never exceed the
+        // accumulated fees, so a sweep can't dip into merchant settlements.
+        if sweep_amount <= 0 || sweep_amount > accumulated {
+            return Err(Error::Feature(FeatureError::InsufficientFees));
+        }
 
-        // Issue #111: Require multisig approval for sweeps exceeding the threshold.
-        let sweep_threshold: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::LargePaymentThreshold))
-            .unwrap_or(0);
-        if sweep_threshold > 0 && sweep_amount > sweep_threshold {
-            if config.required_signatures > 1 {
-                return Err(Error::Basic(BasicError::InsufficientAdmins));
-            }
+        // Issue #111: sweeps above the large-payment threshold need multisig.
+        let threshold = PaymentContract::get_large_payment_threshold(env.clone());
+        let multisig_threshold = if threshold > 0 { threshold } else { 1_000_000 };
+        if sweep_amount > multisig_threshold && config.required_signatures > 1 {
+            return Err(Error::Proposal(ProposalError::RequiresMultiSig));
         }
 
         let fee_config: FeeConfig = env
@@ -12729,6 +13034,7 @@ impl PaymentContract {
         // Security check: Ensure sweep won't encroach on merchant pending settlements
         let token_client = token::Client::new(&env, &fee_config.fee_token);
         token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
+        let remaining = accumulated - sweep_amount;
         env.storage()
             .instance()
             .set(&DataKey::Payment(PaymentKey::AccumulatedFees), &remaining);
@@ -13273,6 +13579,7 @@ impl PaymentContract {
     /// Returns an error if the settlement is already finalized, not found,
     /// or the release time has not yet passed.
     pub fn finalize_pending_settlement(env: Env, payment_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         if finality::is_flagged(&env, payment_id) {
             return Err(Error::Payment(PaymentError::PaymentFlagged));
         }
@@ -13502,6 +13809,7 @@ impl PaymentContract {
         route: RouteOption,
         payment_id: u64,
     ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         customer.require_auth();
 
         // Validate route is still valid at execution time
@@ -13872,6 +14180,12 @@ mod test_schema_migration;
 
 #[cfg(test)]
 mod test_paginated_queries;
+
+#[cfg(test)]
+mod test_storage_ttl;
+
+#[cfg(test)]
+mod test_cross_contract_verification;
 
 #[cfg(test)]
 mod test_completion_fee_parity;
