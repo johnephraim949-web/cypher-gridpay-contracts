@@ -1840,6 +1840,18 @@ impl EscrowContract {
         AdminAdded { admin }.publish(&env);
     }
 
+    /// Proves that `leaf_hash` (SHA-256 of a finalized escrow's XDR) is the
+    /// `index`-th leaf of the archived-record Merkle accumulator (#243).
+    /// Returns `false` for `index >= leaf_count` or a malformed proof.
+    pub fn verify_archived_record_inclusion(
+        env: Env,
+        leaf_hash: BytesN<32>,
+        index: u64,
+        proof: Vec<BytesN<32>>,
+    ) -> bool {
+        storage::verify_archived_record_inclusion(&env, leaf_hash, index, proof)
+    }
+
     /// Returns schema version.
     ///
     /// # Arguments
@@ -2742,6 +2754,8 @@ impl EscrowContract {
             &DataKey::Escrow(EscrowKey::Data(request.escrow_id)),
             &escrow,
         );
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         request.executed = true;
         env.storage().instance().set(
@@ -3367,6 +3381,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         // Perform transfers
         let token_client = token::Client::new(&env, &escrow.token);
@@ -3693,6 +3709,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::MultiToken(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         for entry in escrow.tokens.iter() {
             let token_client = token::Client::new(&env, &entry.token);
@@ -3776,6 +3794,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::MultiParty(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         let token_client = token::Client::new(&env, &escrow.token);
         token_client.transfer(
@@ -3834,6 +3854,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::MultiToken(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         for entry in escrow.tokens.iter() {
             let token_client = token::Client::new(&env, &entry.token);
@@ -4061,6 +4083,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         let fee_amount = fixed_math::mul_div_ceil_or_panic(&env, escrow.amount, escrow.fee_bps, 10000);
         let merchant_amount = escrow.amount - fee_amount;
@@ -4227,6 +4251,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         // CEI: Resolved status is persisted above before refunding the customer.
         EscrowContract::transfer_if_token_contract(
@@ -5482,6 +5508,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &updated_escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &updated_escrow));
 
         // Remove collateral record
         env.storage()
@@ -5805,6 +5833,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow_mut);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow_mut));
 
         // CEI: clear the collateral record before paying it out so it cannot
         // be distributed twice.
@@ -7707,6 +7737,8 @@ impl EscrowContract {
                 env.storage()
                     .instance()
                     .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+                // Issue #243: commit the finalized escrow to the Merkle accumulator.
+                storage::append_archived_leaf(env, storage::archived_record_leaf(env, &escrow));
 
                 let fee_amount = fixed_math::mul_div_ceil_or_panic(env, escrow.amount, escrow.fee_bps, 10000);
                 let merchant_amount = escrow.amount - fee_amount;
@@ -10005,6 +10037,8 @@ impl EscrowContract {
             env.storage()
                 .instance()
                 .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+            // Issue #243: commit the finalized escrow to the Merkle accumulator.
+            storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
             let fee_amount = fixed_math::mul_div_ceil_or_panic(&env, escrow.amount, escrow.fee_bps, 10000);
             let merchant_amount = escrow.amount - fee_amount;
@@ -11104,6 +11138,8 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::Escrow(EscrowKey::Data(escrow_id)), &escrow);
+        // Issue #243: commit the finalized escrow to the Merkle accumulator.
+        storage::append_archived_leaf(&env, storage::archived_record_leaf(&env, &escrow));
 
         // CEI: Cancelled status is persisted above before the refund transfer.
         EscrowContract::transfer_if_token_contract(
