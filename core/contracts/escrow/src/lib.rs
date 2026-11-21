@@ -10,7 +10,13 @@ use soroban_sdk::{
     Vec,
 };
 
+mod collateral_health;
+pub use collateral_health::*;
 pub mod reentrancy;
+mod retainer;
+#[cfg(test)]
+mod retainer_test;
+pub use retainer::{RetainerDrawn, RetainerEscrow};
 pub mod storage;
 use storage::StorageTier;
 pub mod fixed_math;
@@ -115,6 +121,8 @@ pub enum ParticipantKey {
 #[derive(Clone)]
 #[contracttype]
 pub enum DisputeKey {
+    LastMarginCall(u64),
+    LiquidationConfigV2,
     Action(u64),
     Counter,
     Collateral(u64),
@@ -146,6 +154,8 @@ pub enum DisputeKey {
 #[derive(Clone)]
 #[contracttype]
 pub enum DataKey {
+    Retainer(u64),
+    RetainerCounter,
     Config(ConfigKey),
     Escrow(EscrowKey),
     Participant(ParticipantKey),
@@ -197,6 +207,7 @@ pub enum BasicError {
     MigrationInProgress = 115,
     /// `migrate_schema_step` was called with a batch size of 0.
     InvalidMigrationBatch = 116,
+    ReentrantCallDetected = 117,
 }
 
 /// Errors relating to escrow creation, status transitions, vesting, and expiration.
@@ -270,6 +281,9 @@ pub enum EscrowError {
     TimelockNotElapsed = 232,
     /// Escrow deposit is below the configured minimum (`ConfigKey::MinEscrowAmount`). Resolution: deposit at least the minimum.
     DepositBelowMinimum = 233,
+    InvalidRetainerTerms = 234,
+    RetainerBalanceExceeded = 235,
+    RetainerPeriodCapExceeded = 236,
 }
 
 /// Errors relating to disputes, arbitration, evidence, observers, and token swaps.
@@ -377,10 +391,10 @@ impl TryFrom<soroban_sdk::Error> for Error {
             if code >= 300 && code <= 323 {
                 return Ok(Error::Action(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 200 && code <= 233 {
+            if code >= 200 && code <= 236 {
                 return Ok(Error::Escrow(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 100 && code <= 116 {
+            if code >= 100 && code <= 117 {
                 return Ok(Error::Basic(unsafe { core::mem::transmute(code) }));
             }
             if code == 999 {
@@ -1082,6 +1096,15 @@ pub struct LiquidationConfig {
     pub enabled: bool,
     pub oracle: OracleConfig,
     pub ltv_threshold_bps: u32, // Loan-To-Value threshold in basis points (e.g., 12000 = 120%)
+    pub margin_call_bps: u32,
+}
+
+#[derive(Clone)]
+#[contracttype]
+struct LegacyLiquidationConfig {
+    pub enabled: bool,
+    pub oracle: OracleConfig,
+    pub ltv_threshold_bps: u32,
 }
 
 #[derive(Clone)]
@@ -4868,7 +4891,6 @@ impl EscrowContract {
             EscrowStatus::ExpiredRefunded => Err(Error::Escrow(EscrowError::AlreadyProcessed)),
             EscrowStatus::DormantNoticePeriod => Err(Error::Escrow(EscrowError::InvalidStatus)),
         }
-            EscrowStatus::ExpiredRefunded => Err(Error::Escrow(EscrowError::AlreadyProcessed)),
     }
 
     fn internal_release_escrow(
@@ -6605,53 +6627,10 @@ impl EscrowContract {
         liquidator.require_auth();
         Self::require_not_paused(&env, "liquidate_collateral")?;
 
-        // Check if escrow exists
-        if !env
-            .storage()
-            .instance()
-            .has(&DataKey::Escrow(EscrowKey::Data(escrow_id)))
-        {
-            return Err(Error::Escrow(EscrowError::NotFound));
-        }
-
-        let escrow = EscrowContract::get_escrow(&env, escrow_id);
-
-        // Liquidation can only occur when collateral is deposited in a dispute
-        if escrow.status != EscrowStatus::Disputed {
-            return Err(Error::Escrow(EscrowError::InvalidStatus));
-        }
-
-        // Get liquidation config
-        let config = Self::get_liquidation_config(env.clone())
-            .ok_or(Error::Escrow(EscrowError::NotFound))?;
-
-        if !config.enabled {
-            return Err(Error::Escrow(EscrowError::InvalidStatus));
-        }
-
-        // Get collateral deposit record
-        let collateral = env
-            .storage()
-            .instance()
-            .get::<DataKey, DisputeCollateral>(&DataKey::Dispute(DisputeKey::Collateral(
-                escrow_id,
-            )))
-            .ok_or(Error::Action(ActionError::InsufficientCollateral))?;
-
-        // Call oracle to get current collateral price
+        let (escrow, collateral, config) = Self::collateral_position(&env, escrow_id)?;
         let price_data = Self::get_oracle_price(env.clone(), &config.oracle)?;
-
-        // Calculate LTV ratio: (collateral_value / escrow_debt) * 10000
-        // collateral_value = collateral_amount * price
-        let collateral_value = collateral.amount.saturating_mul(price_data.price);
-        let ltv_ratio_bps = if collateral_value > 0 && escrow.amount > 0 {
-            (collateral_value / escrow.amount).min(u32::MAX as i128) as u32
-        } else {
-            u32::MAX
-        };
-
-        // Liquidation is triggered when LTV falls below the threshold
-        if ltv_ratio_bps >= config.ltv_threshold_bps {
+        let report = Self::collateral_health_report(&env, &escrow, &collateral, &config, price_data.price);
+        if report.status != CollateralHealthStatus::Liquidatable {
             return Err(Error::Escrow(EscrowError::ReleaseNotYetAvailable));
         }
 
@@ -6692,7 +6671,7 @@ impl EscrowContract {
             liquidator,
             collateral_amount: collateral.amount,
             collateral_price: price_data.price,
-            ltv_ratio_bps,
+            ltv_ratio_bps: report.health_factor_bps,
             triggered_at: env.ledger().timestamp(),
         }
         .publish(&env);
@@ -6702,12 +6681,19 @@ impl EscrowContract {
 
     /// Queries oracle for collateral price data.
     fn get_oracle_price(env: Env, oracle_config: &OracleConfig) -> Result<OraclePriceData, Error> {
-        // For now, return a mock price. In production, this would call an actual oracle contract.
-        // The oracle contract would validate the feed ID and staleness threshold.
-        Ok(OraclePriceData {
-            price: 1_000_000i128, // 1 token = 1,000,000 (smallest unit price)
-            timestamp: env.ledger().timestamp(),
-        })
+        let price: OraclePriceData = env.invoke_contract(
+            &oracle_config.oracle_address,
+            &Symbol::new(&env, "get_price"),
+            (oracle_config.price_feed_id.clone(),).into_val(&env),
+        );
+        let now = env.ledger().timestamp();
+        if price.timestamp > now || now - price.timestamp > oracle_config.staleness_threshold {
+            return Err(Error::Action(ActionError::StaleOraclePrice));
+        }
+        if price.price <= 0 {
+            return Err(Error::Escrow(EscrowError::InvalidStatus));
+        }
+        Ok(price)
     }
 
     /// Returns an advisory dispute recommendation derived from the customer's
@@ -11579,12 +11565,14 @@ impl EscrowContract {
             return Err(Error::Basic(BasicError::NotAnAdmin));
         }
         // Validate LTV threshold is reasonable (e.g., between 100% and 200%)
-        if config.ltv_threshold_bps < 10000 || config.ltv_threshold_bps > 20000 {
+        if config.ltv_threshold_bps < 10000 || config.ltv_threshold_bps > 20000
+            || config.margin_call_bps <= config.ltv_threshold_bps
+        {
             return Err(Error::Escrow(EscrowError::InvalidStatus));
         }
         env.storage()
             .instance()
-            .set(&DataKey::Dispute(DisputeKey::LiquidationConfig), &config);
+            .set(&DataKey::Dispute(DisputeKey::LiquidationConfigV2), &config);
         Ok(())
     }
 
@@ -11596,9 +11584,17 @@ impl EscrowContract {
     /// # Returns
     /// Some(LiquidationConfig) if configured, None otherwise.
     pub fn get_liquidation_config(env: Env) -> Option<LiquidationConfig> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Dispute(DisputeKey::LiquidationConfig))
+        env.storage().instance().get(&DataKey::Dispute(DisputeKey::LiquidationConfigV2))
+            .or_else(|| {
+                let legacy: LegacyLiquidationConfig = env.storage().instance()
+                    .get(&DataKey::Dispute(DisputeKey::LiquidationConfig))?;
+                Some(LiquidationConfig {
+                    enabled: legacy.enabled,
+                    oracle: legacy.oracle,
+                    ltv_threshold_bps: legacy.ltv_threshold_bps,
+                    margin_call_bps: legacy.ltv_threshold_bps.saturating_add(1),
+                })
+            })
     }
 
     /// Sets the evidence submission deadline config.

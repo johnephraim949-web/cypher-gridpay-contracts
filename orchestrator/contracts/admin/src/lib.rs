@@ -1554,6 +1554,14 @@ impl AdminContract {
             return Err(Error::Unauthorized);
         }
 
+        let refund_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RefundContract)
+            .ok_or(Error::NotInitialized)?;
+        RefundContractClient::new(&env, &refund_contract)
+            .apply_supreme_refund_ruling(&stored_admin, &refund_id, &approve_customer);
+
         env.events().publish(
             (Symbol::new(&env, "supreme_dispute_resolved"), refund_id),
             approve_customer,
