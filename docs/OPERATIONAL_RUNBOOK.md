@@ -5,6 +5,7 @@ This runbook is for the protocol team when a security vulnerability or live expl
 Keep it next to your signing setup. In an incident, the aim is to run the commands below without stopping to look anything up.
 
 > **Related references:**
+> - [MAINNET_LAUNCH_CHECKLIST.md](./MAINNET_LAUNCH_CHECKLIST.md) — launch gates, multisig ceremony, severity classification, and status-page templates.
 > - [STORAGE_VERSIONING.md](./STORAGE_VERSIONING.md) — complete storage key inventory, chunked `migrate_schema_step` runbook, and XDR compatibility pitfalls.
 > - [STORAGE_RESTORATION.md](./STORAGE_RESTORATION.md) — decision matrix for automated `restorePreamble` vs. manual keeper/admin restoration, and `verify_archived_record_inclusion`.
 > - [ARCHITECTURE.md](./ARCHITECTURE.md) — contract topology and storage tiers.
@@ -52,7 +53,7 @@ To add identities, use `stellar keys add <name> --secret-key` (you will be promp
 |---|---|
 | Active exploit, or root cause unknown | **Global emergency pause** ([§2.1](#21-global-emergency-pause-preferred)) |
 | Bug confined to one entry point, funds not at immediate risk | Function-level pause on the affected contract ([§2.4](#24-targeted-function-level-pause)) |
-| Suspected compromise of the pauser/admin key | Global pause with a **different** key if possible, then treat key rotation as part of recovery |
+| Suspected compromise of the pauser/admin key | Global pause with a **different** key if possible, then treat key rotation as part of recovery ([§7](#7-p0-incident-playbooks)) |
 
 When in doubt, pause everything. Resuming is cheap. Lost funds usually cannot be recovered.
 
@@ -171,26 +172,124 @@ stellar contract invoke --id $REFUND_ID  --source-account $PAUSER --network $NET
   -- get_refund --refund_id <ID>
 ```
 
-Also record the schema version of each contract (`get_schema_version`) and the wasm hash currently deployed:
+---
+
+## 5. Recovery: upgrade and resume
+
+After the root cause is fixed and the new WASM is verified (see [MAINNET_LAUNCH_CHECKLIST.md §1.1](./MAINNET_LAUNCH_CHECKLIST.md#11-reproducible-wasm-build-hash-verification)), upgrade and repoint child contracts, then unpause.
+
+### 5.1 Unpause all
 
 ```bash
-stellar contract fetch --id $PAYMENT_ID --network $NETWORK -o payment-deployed.wasm
-sha256sum payment-deployed.wasm
+stellar contract invoke \
+  --id $ADMIN_ID \
+  --source-account $PAUSER \
+  --network $NETWORK \
+  -- emergency_unpause_all \
+  --pauser $PAUSER_ADDR
 ```
 
-Use `stellar contract info interface --id <ID> --network $NETWORK` to confirm which interface is live.
+Verify with [§3](#3-verify-the-pause-took-effect): every contract must show `"globally_paused": false`.
 
-### 4.3 Checklist
+---
 
-- [ ] Root cause identified and reproduced in a unit test (`cargo test` in `core/` or `orchestrator/`)
-- [ ] Complete list of affected payment / escrow / refund IDs
-- [ ] Token balances held by each contract reconciled against the stored records
-- [ ] Deci
+## 6. Keeping contracts alive (TTL)
 
-- [Admin contract README](../orchestrator/contracts/admin/README.md)
-- [Storage versioning](./STORAGE_VERSIONING.md)
-- [Deployment](./DEPLOYMENT.md)
-- [Security policy](../SECURITY.md)
-- [Multi-Asset & Oracle Configuration Guide](./MULTI_ASSET_AND_ORACLES.md) — token delisting, oracle staleness and manual fallback procedures
-- [Economic invariants & balance conservation](./ECONOMIC_INVARIANTS.md)
-/* … truncated 5097 chars — edit only what you need near the top … */
+```bash
+stellar contract invoke --id $ADMIN_ID --source-account $ADMIN --network $NETWORK -- ping
+```
+
+If an entry is archived, restore it before retrying any call:
+
+```bash
+stellar contract restore --id $ADMIN_ID --source-account $ADMIN --network $NETWORK
+```
+
+See [STORAGE_RESTORATION.md](./STORAGE_RESTORATION.md) for the full decision matrix.
+
+---
+
+## 7. P0 incident playbooks
+
+Each playbook is copy-paste ready. Run verification queries with `--send=no` before and after every state change.
+
+### 7.1 Emergency Pause All / Post-Mortem Unpause
+
+1. Pause: [§2.1](#21-global-emergency-pause-preferred).
+2. Verify: [§3](#3-verify-the-pause-took-effect).
+3. After the post-mortem is signed off, unpause: [§5.1](#51-unpause-all).
+
+### 7.2 Compromised admin / emergency pauser key rotation
+
+1. Pause with a **different** trusted key if the pauser is compromised ([§2.1](#21-global-emergency-pause-preferred)).
+2. Rotate the pauser:
+
+```bash
+stellar contract invoke \
+  --id $ADMIN_ID \
+  --source-account $ADMIN \
+  --network $NETWORK \
+  -- set_emergency_pauser \
+  --pauser $NEW_PAUSER_ADDR
+```
+
+3. Propose a new admin (multisig ceremony, see [MAINNET_LAUNCH_CHECKLIST.md §3](./MAINNET_LAUNCH_CHECKLIST.md#3-hardware-wallet-multisig-ceremony)):
+
+```bash
+stellar contract invoke \
+  --id $ADMIN_ID \
+  --source-account $ADMIN \
+  --network $NETWORK \
+  -- propose_admin \
+  --new_admin $NEW_ADMIN_ADDR
+```
+
+4. Guardians may veto a malicious proposal before it is accepted. Verify the pending proposal:
+
+```bash
+stellar contract invoke --id $ADMIN_ID --source-account $ADMIN --network $NETWORK --send=no \
+  -- get_pending_admin
+```
+
+### 7.3 Emergency contract rotation
+
+1. Propose the new payment contract:
+
+```bash
+stellar contract invoke \
+  --id $ADMIN_ID \
+  --source-account $ADMIN \
+  --network $NETWORK \
+  -- set_payment_contract \
+  --payment $NEW_PAYMENT_ID
+```
+
+2. Execute the rotation once verified:
+
+```bash
+stellar contract invoke \
+  --id $ADMIN_ID \
+  --source-account $ADMIN \
+  --network $NETWORK \
+  -- execute_payment_rotation
+```
+
+3. Abort a bad proposal:
+
+```bash
+stellar contract invoke \
+  --id $ADMIN_ID \
+  --source-account $ADMIN \
+  --network $NETWORK \
+  -- cancel_proposed_rotation
+```
+
+### 7.4 Critical Soroban storage entry archived
+
+Follow the quick-action steps in [STORAGE_RESTORATION.md](./STORAGE_RESTORATION.md): restore the archived entry, then verify inclusion with `verify_archived_record_inclusion` before retrying the failed call.
+
+### 7.5 Oracle feed stale or deviating
+
+1. Check the latest oracle reading and timestamp via the read-only getter (`--send=no`).
+2. If the feed is stale or deviates beyond tolerance, pause the affected entry point ([§2.4](#24-targeted-function-level-pause)) until the feed recovers.
+3. Escalate to the oracle provider and record the deviation in the incident notes.
