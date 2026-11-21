@@ -69,31 +69,14 @@ See [`services/relayer/README.md`](services/relayer/README.md) for the `POST /v1
 
 ## 📂 Contract Overview
 
-### Payment Contract (`core/contracts/payment`)
+| Contract | Responsibilities |
+| --- | --- |
+| [Payment](core/contracts/payment/README.md) | Payment creation and settlement, private invoice routing, subscriptions and dunning, streaming channels, token allowlists and conversion rates. |
+| [Escrow](core/contracts/escrow/README.md) | Conditional custody, hold periods, child escrows, dispute voting, release, swaps and emergency clawback. |
+| [Refund](core/contracts/refund/README.md) | Refund policy, caps and settlement, dispute evidence, appeals, arbitrator staking and reputation. |
+| [Admin Orchestrator](orchestrator/contracts/admin/README.md) | Coordinated pauses, contract address rotations, WASM upgrades, policy synchronization and supreme dispute decisions. |
 
-Handles payment creation and processing:
-- `create_payment()` - Customer initiates payment
-- `complete_payment()` - Admin releases to merchant
-- `refund_payment()` - Admin refunds to customer
-- `get_payment()` - Query payment details
-
-### Escrow Contract (`core/contracts/escrow`)
-
-Manages fund holding and disputes:
-- `create_escrow()` - Lock funds
-- `release_escrow()` - Release to merchant
-- `dispute_escrow()` - Handle disputes
-
-### Refund Contract (`core/contracts/refund`)
-
-Processes refund requests:
-- `request_refund()` - Merchant initiates
-- `approve_refund()` - Admin approves
-- `process_refund()` - Execute refund
-- `get_refunds_by_reason_code()` - Filter refunds by structured reason code with pagination
-- `get_reason_code_analytics()` - Count refunds by reason code (sorted by frequency)
-
-#### Refund Reason Code Migration (Breaking)
+### Refund Reason Code Migration (Breaking)
 
 `request_refund()` now requires a `reason_code: RefundReasonCode` argument in addition to free-text `reason`.
 
@@ -165,31 +148,52 @@ deployment details.
 6. Push to your branch (`git push origin feature/amazing-feature`)
 7. Open a Pull Request
 
-## 🔗 Links
+## Documentation Index
 
-- [TypeScript SDK](sdk/typescript/README.md)
-- [Python SDK](docs/PYTHON_SDK.md)
-- [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
-- [Storage Restoration Guide](docs/STORAGE_RESTORATION.md)
-- Telegram: https://t.me/+afM9uh7GGtVkYmZk
-- [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
-- [SDK Repository](https://github.com/cypher-gridpay/cypher-gridpay-sdk)
+| Guide |
+| --- |
+| [Architecture](docs/ARCHITECTURE.md) |
+| [Deployment](docs/DEPLOYMENT.md) |
+| [Economic invariants](docs/ECONOMIC_INVARIANTS.md) |
+| [Error codes](docs/ERROR_CODES.md) |
+| [Gas and WASM optimization](docs/GAS_AND_WASM_OPTIMIZATION.md) |
+| [Glossary](docs/GLOSSARY.md) |
+| [Merchant integration](docs/MERCHANT_INTEGRATION_GUIDE.md) |
+| [Multi-asset and oracle configuration](docs/MULTI_ASSET_AND_ORACLES.md) |
+| [Operational runbook](docs/OPERATIONAL_RUNBOOK.md) |
+| [Privacy and compliance](docs/PRIVACY_AND_COMPLIANCE.md) |
+| [Python SDK](docs/PYTHON_SDK.md) |
+| [Storage restoration](docs/STORAGE_RESTORATION.md) |
+| [Storage versioning](docs/STORAGE_VERSIONING.md) |
+| [Testing](docs/TESTING_GUIDE.md) |
+| [Admin orchestrator UX](docs/ux/admin-orchestrator-safety-ux.md) |
+| [Analytics visualization UX](docs/ux/analytics-dataviz-spec.md) |
+| [Streaming channels UX](docs/ux/streaming-channels-ux.md) |
+| [Wallet onboarding UX](docs/ux/wallet-onboarding-ux.md) |
+| [Backend services architecture](docs/BACKEND_SERVICES_ARCHITECTURE.md) |
+| [Dispute evidence storage](docs/DISPUTE_EVIDENCE_STORAGE.md) |
+| [Escape hatch and governance timelock](docs/ESCAPE_HATCH_AND_GOVERNANCE_TIMELOCK.md) |
+| [Escrow extensions and arbitration](docs/ESCROW_EXTENSIONS_AND_ARBITRATION.md) |
+| [Event indexer architecture](docs/EVENT_INDEXER_ARCHITECTURE.md) |
+| [Financial accounting and audit exports](docs/FINANCIAL_ACCOUNTING_AND_AUDIT_EXPORTS.md) |
+| [Ledger reconciliation](docs/LEDGER_RECONCILIATION.md) |
+| [Multisig proposal coordination](docs/MULTISIG_PROPOSAL_COORDINATION.md) |
+| [Payment channel watchtower service](docs/PAYMENT_CHANNEL_WATCHTOWER_SERVICE.md) |
+| [Preflight compliance and fraud screening](docs/PREFLIGHT_COMPLIANCE_AND_FRAUD_SCREENING.md) |
+| [Smart meter ingestion gateway](docs/SMART_METER_INGESTION_GATEWAY.md) |
+| [Soroban RPC load balancer](docs/SOROBAN_RPC_LOAD_BALANCER.md) |
+| [Webhook events](docs/WEBHOOK_EVENTS.md) |
+| [Split forwarding configurator](docs/ux/split-forwarding-configurator.md) |
+| [System status banners](docs/ux/system-status-banners.md) |
+| [TypeScript SDK](sdk/typescript/README.md) |
+| [Design tokens](packages/design-tokens/README.md) |
+| [Payment validation](PAYMENT_VALIDATION_FEATURES.md) |
+| [Security policy](SECURITY.md) |
+| [Contributor guide](CONTRIBUTING.md) |
+| [Changelog](CHANGELOG.md) |
 
+Community chat is available on Telegram at https://t.me/+afM9uh7GGtVkYmZk.
 
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
-
-## Handsoff notes
-
-<!-- handsoff-issue-10 -->
-- #10: payment: Implement dynamic risk fee surcharge updates based on merchant chargeback history
-
-<!-- handsoff-issue-11 -->
-- #11: payment: Add nonce and replay protection to multisig action proposal execution
-
-<!-- handsoff-issue-13 -->
-- #13: payment: Add expiration and overflow checks to customer loyalty points system
-
-<!-- handsoff-issue-397 -->
-- #397: docs: Document Off-Chain Backend API OpenAPI 3.1 Specification, Webhook Event Catalog, and HMAC Signature Verification
