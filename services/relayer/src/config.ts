@@ -2,6 +2,9 @@ import { Contract, StrKey } from "@stellar/stellar-sdk";
 import { BadRequestError } from "./errors.js";
 import type { RelayerConfig, SponsorRequest } from "./types.js";
 
+export const DEFAULT_OTEL_SERVICE_NAME = "gridpay-relayer";
+export const DEFAULT_OTEL_TRACES_SAMPLER = "parentbased_traceidratio";
+
 const DEFAULT_ENTRYPOINTS = [
   "create_payment",
   "pay_installment",
@@ -46,6 +49,26 @@ function readInt(
     throw new Error(`${key} must be an integer between ${minimum} and ${maximum}`);
   }
   return value;
+}
+
+function readBool(env: NodeJS.ProcessEnv, key: string, fallback: boolean): boolean {
+  const raw = env[key]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  throw new Error(`${key} must be a boolean`);
+}
+
+function readOptionalUrl(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const raw = env[key]?.trim();
+  if (raw === undefined || raw === "") return undefined;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("bad protocol");
+  } catch {
+    throw new Error(`${key} must be an http(s) URL`);
+  }
+  return raw;
 }
 
 function readUrl(env: NodeJS.ProcessEnv, key: string): string {
@@ -138,6 +161,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): RelayerConfig 
     alertWebhookUrl: env.RELAYER_ALERT_WEBHOOK_URL?.trim() || undefined,
     maxBodyBytes: readInt(env, "RELAYER_MAX_BODY_BYTES", 1_048_576, 1024),
     maxXdrChars: readInt(env, "RELAYER_MAX_XDR_CHARS", 262_144, 1024),
+    otel: {
+      enabled: readBool(env, "OTEL_ENABLED", false),
+      endpoint: readOptionalUrl(env, "OTEL_EXPORTER_OTLP_ENDPOINT"),
+      serviceName: env.OTEL_SERVICE_NAME?.trim() || DEFAULT_OTEL_SERVICE_NAME,
+      tracesSampler: env.OTEL_TRACES_SAMPLER?.trim() || DEFAULT_OTEL_TRACES_SAMPLER,
+    },
   };
 }
 

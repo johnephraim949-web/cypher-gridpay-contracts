@@ -14,3 +14,27 @@ dependencies = [
 
 [project.optional-dependencies]
 redis = ["redis>=5,<7"]
+test = [
+    "pytest>=8,<9",
+    "pytest-cov>=5,<7",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=cypher_gridpay --cov-report=term-missing --cov-report=lcov:coverage.lcov"
+
+[tool.coverage.run]
+source = ["cypher_gridpay"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/conftest.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

@@ -73,6 +73,99 @@ jobs:
         run: |
           make test
 
+  coverage:
+    name: Code Coverage (Rust + TS + Python)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Collect Rust coverage (core)
+        run: |
+          mkdir -p coverage
+          cd core
+          cargo llvm-cov --workspace --lcov --output-path ../coverage/core-lcov.info \
+            --ignore-filename-regex '(_test\.rs|test_.*\.rs|test_utils/)'
+          cargo llvm-cov report --summary-only | tee ../coverage/core-summary.txt
+
+      - name: Collect Rust coverage (orchestrator)
+        run: |
+          cd orchestrator
+          cargo llvm-cov --workspace --lcov --output-path ../coverage/orchestrator-lcov.info \
+            --ignore-filename-regex '(_test\.rs|test_.*\.rs|test_utils/)'
+          cargo llvm-cov report --summary-only | tee ../coverage/orchestrator-summary.txt
+
+      - name: Collect TypeScript SDK coverage (Vitest)
+        run: |
+          cd sdk/typescript
+          npm ci
+          npx vitest run --coverage --coverage.reporter=lcov --coverage.reportsDirectory=../../coverage/ts-sdk || true
+
+      - name: Collect Python SDK coverage (pytest-cov)
+        run: |
+          cd sdk/python
+          python -m pip install --upgrade pip
+          pip install -e . pytest pytest-cov || pip install pytest pytest-cov
+          python -m pytest --cov=. --cov-report=lcov:../../coverage/py-sdk-lcov.info --cov-report=term || true
+
+      - name: Write coverage summary to GitHub Actions
+        run: |
+          {
+            echo "## Coverage Summary"
+            echo ""
+            echo "| Component | Report |"
+            echo "|-----------|--------|"
+            echo "| core (payment/escrow/refund) | \`coverage/core-summary.txt\` |"
+            echo "| orchestrator | \`coverage/orchestrator-summary.txt\` |"
+            echo "| ts-sdk | \`coverage/ts-sdk/lcov.info\` |"
+            echo "| py-sdk | \`coverage/py-sdk-lcov.info\` |"
+            echo ""
+            echo "### Rust per-crate line/branch coverage"
+            echo ""
+            echo '```'
+            cat coverage/core-summary.txt 2>/dev/null || echo "core summary unavailable"
+            echo ""
+            cat coverage/orchestrator-summary.txt 2>/dev/null || echo "orchestrator summary unavailable"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload LCOV reports (artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage/
+          if-no-files-found: warn
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          files: |
+            coverage/core-lcov.info
+            coverage/orchestrator-lcov.info
+            coverage/ts-sdk/lcov.info
+            coverage/py-sdk-lcov.info
+          flags: payment,escrow,refund,orchestrator,ts-sdk,py-sdk
+
   crank-worker:
     name: Crank Worker (TypeScript)
     runs-on: ubuntu-latest

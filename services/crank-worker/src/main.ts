@@ -5,9 +5,17 @@ import { SimulateFirstPipeline } from "./pipeline.js";
 import { createStellarStack } from "./rpc/stellar.js";
 import { CrankWorker } from "./scheduler.js";
 import { PostgresScheduleStore } from "./store/postgres.js";
+import { initTelemetry, shutdownTelemetry } from "./telemetry.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
+  const telemetry = initTelemetry({
+    serviceName: "crank-worker",
+    network: config.network,
+    otlpEndpoint: config.otelEndpoint,
+  });
+  const logger = telemetry.logger;
+
   const pgPool = new Pool({ connectionString: config.databaseUrl });
   const store = new PostgresScheduleStore(pgPool);
   await store.initialize();
@@ -37,17 +45,26 @@ async function main(): Promise<void> {
       baseBackoffMs: config.baseBackoffMs,
       maxBackoffMs: config.maxBackoffMs,
     },
-    logger: (message) => console.log(message),
+    logger: (message) => logger.info(message, { component: "crank-scheduler" }),
   });
 
   const controller = new AbortController();
-  process.on("SIGINT", () => controller.abort());
-  process.on("SIGTERM", () => controller.abort());
+  const shutdown = (signal: string): void => {
+    logger.info("shutdown signal received", { signal });
+    controller.abort();
+    // Flush telemetry without blocking the worker loop; bounded by the SDK timeout.
+    void shutdownTelemetry(telemetry).catch((error: unknown) => {
+      console.error("telemetry shutdown failed", error);
+    });
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
   await worker.runForever(controller.signal);
 
   metricsServer?.close();
   await stack.pool.close();
   await pgPool.end();
+  await shutdownTelemetry(telemetry);
 }
 
 main().catch((error: unknown) => {
