@@ -65,6 +65,7 @@ pub enum DataKey {
     RefundRma(u64),
     RmaAttestation(u64),
     RmaQuotaPeriod(u64),
+    MerchantQuotaResetCount(Address),
     BuyerProtectionConfig,
     BuyerProtectionBalance(Address),
     MerchantProtectionDebt(Address, Address),
@@ -3840,6 +3841,12 @@ impl RefundContract {
             .instance()
             .get(&DataKey::MerchantRefundQuota(merchant.clone()))
             .ok_or(Error::Core(CoreError::PolicyNotFound))?;
+        let reset_key = DataKey::MerchantQuotaResetCount(merchant.clone());
+        let reset_count: u64 = env.storage().instance().get(&reset_key).unwrap_or(0);
+        let next_reset = reset_count
+            .checked_add(1)
+            .ok_or(Error::Core(CoreError::InvalidAmount))?;
+        env.storage().instance().set(&reset_key, &next_reset);
         quota.used = 0;
         quota.period_start = env.ledger().timestamp();
         env.storage()
@@ -8825,7 +8832,15 @@ impl RefundContract {
         Self::reserve_merchant_quota(env, &refund.merchant, refund.amount)?;
         if env.storage().instance().has(&DataKey::RefundRma(refund_id)) {
             if let Some(quota) = Self::get_merchant_refund_quota(env, refund.merchant.clone()) {
-                env.storage().instance().set(&DataKey::RmaQuotaPeriod(refund_id), &quota.period_start);
+                let reset_count: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MerchantQuotaResetCount(refund.merchant.clone()))
+                    .unwrap_or(0);
+                env.storage().instance().set(
+                    &DataKey::RmaQuotaPeriod(refund_id),
+                    &(quota.period_start, reset_count),
+                );
             }
         }
 

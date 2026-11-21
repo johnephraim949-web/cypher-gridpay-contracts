@@ -115,17 +115,22 @@ impl RefundContract {
         if now <= rma.return_deadline {
             return Err(Error::Core(CoreError::RefundWindowExpired));
         }
-        let reservation: Option<u64> = env
+        let reservation: Option<(u64, u64)> = env
             .storage()
             .instance()
             .get(&DataKey::RmaQuotaPeriod(refund_id));
+        let reset_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MerchantQuotaResetCount(merchant.clone()))
+            .unwrap_or(0);
         let quota_key = DataKey::MerchantRefundQuota(merchant);
         if let Some(mut quota) = env
             .storage()
             .instance()
             .get::<_, MerchantRefundQuota>(&quota_key)
         {
-            if reservation == Some(quota.period_start) {
+            if reservation == Some((quota.period_start, reset_count)) {
                 quota.used = quota.used.saturating_sub(refund.amount).max(0);
                 env.storage().instance().set(&quota_key, &quota);
             }
