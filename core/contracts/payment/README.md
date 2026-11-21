@@ -1,6 +1,6 @@
 # Payment Contract
 
-Part of the [Cypher GridPay smart contracts](../../README.md) suite on Stellar/Soroban.
+Part of the [Cypher GridPay smart contracts](../../../README.md) suite on Stellar/Soroban.
 
 ## Purpose
 
@@ -840,7 +840,7 @@ assert_eq!(
 | ------------------------------------------------- | ---------------------------------------------------------- |
 | `set_conversion_rate(admin, currency, rate)`      | Manually set the conversion rate for a currency.           |
 | `get_conversion_rate(currency)`                   | Return the stored conversion rate for a currency.          |
-| `set_oracle_rate_config(admin, currency, config)` | Configure an on-chain oracle source for a currency's rate. |
+| `set_oracle_rate_config(admin, config)` | Configure an on-chain oracle source for a currency's rate. |
 | `get_oracle_rate_config(currency)`                | Return the oracle configuration for a currency.            |
 | `refresh_conversion_rate(currency)`               | Pull a fresh rate from the configured oracle contract.     |
 
@@ -1106,7 +1106,7 @@ Errors are grouped into five ranges:
 | 400–406 | `ProposalError` — multi-sig proposal violations                |
 | 500–540 | `FeatureError` — channels, splits, loyalty, escrow, forwarding |
 
-See [`ERRORS.md`](./ERRORS.md) for the full list.
+See [Protocol error codes](../../../docs/ERROR_CODES.md) for the full list.
 
 ---
 
@@ -1154,8 +1154,28 @@ stellar contract invoke --id $CONTRACT_ID \
 
 ---
 
+## Streaming Channels
+
+`open_streaming_channel` funds a channel, `get_streaming_channel` reads its
+state, and `get_streaming_claimable` reports accrued base units. Use
+`claim_streaming_channel` to withdraw accrued value and
+`close_streaming_channel` to settle and close the stream. See the
+[streaming channel interface guide](../../../docs/ux/streaming-channels-ux.md).
+
+## Private Invoice Routing
+
+`create_private_payment` registers a vault commitment.
+`complete_private_payment` checks the vault's reveal and either settles the
+payment or proposes it for large-payment approval. See
+[privacy and compliance](../../../docs/PRIVACY_AND_COMPLIANCE.md#private-invoice-routing)
+for commitment encoding, authorization, and public ledger fields.
+
+See also the [multi-asset guide](../../../docs/MULTI_ASSET_AND_ORACLES.md),
+[storage versioning](../../../docs/STORAGE_VERSIONING.md),
+[glossary](../../../docs/GLOSSARY.md) and [changelog](../../../CHANGELOG.md).
+
 ## See Also
 
-- [Root README](../../README.md) — architecture overview and workspace setup
+- [Root README](../../../README.md) — architecture overview and workspace setup
 - [Escrow Contract](../escrow/README.md)
 - [Refund Contract](../refund/README.md)

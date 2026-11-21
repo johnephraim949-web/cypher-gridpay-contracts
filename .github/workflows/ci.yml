@@ -8,6 +8,34 @@ on:
     branches: [main, develop]
 
 jobs:
+  markdown-links:
+    name: Markdown relative links and anchors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: lycheeverse/lychee-action@v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: "--offline --include-fragments '**/*.md'"
+          fail: true
+
+  design-tokens:
+    name: Design token build and contrast
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: packages/design-tokens/package-lock.json
+      - name: Build tokens and verify contrast
+        working-directory: packages/design-tokens
+        run: |
+          npm ci
+          npm test
+          git diff --exit-code -- ../../apps/web/src/styles/tokens.css
+
   relayer:
     name: Gasless Relayer (Node/TypeScript)
     runs-on: ubuntu-latest

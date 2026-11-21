@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+<!-- Use Added, Changed, Deprecated, Removed, Fixed, or Security as appropriate.
+     Keep entries under Unreleased until a version is cut. -->
+
 ### Added
+
+- Merchant guides for ledger privacy, commitment verification, and regulatory
+  audit exports. See [Privacy and compliance](docs/PRIVACY_AND_COMPLIANCE.md).
+- Shared light and dark [design tokens](packages/design-tokens/README.md)
+  with generated CSS and TypeScript, contrast verification, and a showcase.
 
 - **Structured Refund Lifecycle Events (Breaking, Issue #72)** — The refund contract now publishes dashboard-ready Soroban contract events for every refund request, approval, denial and appeal. Each event carries the `customer`, `merchant`, `refund_id` and the canonical `reason_code`, so customer and merchant dashboards can render the refund lifecycle in real time from the event stream alone.
   - **New events:** `RefundRequestedEvent`, `RefundApprovedEvent`, `RefundDeniedEvent`, `AppealFiledEvent` (topics `refund_requested_event`, `refund_approved_event`, `refund_denied_event`, `appeal_filed_event`).
@@ -30,6 +38,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated the [contract overview](README.md#-contract-overview), contract
+  references and [glossary](docs/GLOSSARY.md) to reflect the current entrypoints.
+
 - **Paginated Customer History & Appeal Queries (Breaking, Issue #87)** — Per-customer and per-merchant lists are no longer returned as a single unbounded vector. Every query now takes `(limit, offset)` and every page size is capped at `MAX_QUERY_PAGE_SIZE` (100) so a result set can never exceed Soroban's 64KB ledger entry limit. Records remain stored individually under keyed indices (`SystemKey::AppealByCustomer(customer, index)`, `VoucherKey::CustomerVoucher(customer, index)`, `Merchant(PendingSettlementIndex(merchant, index))`, `State(PartialPaymentRecord(payment_id, installment))`).
   - **Refund contract:** `get_appeals_by_customer(customer)`, `get_customer_vouchers(customer)` and `get_merchant_pending_refunds(merchant)` now require `limit` and `offset`. New counters `get_appeal_count_by_customer()` and `get_customer_voucher_count()` let callers page through the full history.
   - **Payment contract:** `get_pending_settlements(merchant)` and `get_installment_history(payment_id)` now require `limit` and `offset`. New counters `get_pending_settlement_count(merchant)` and `get_installment_count(payment_id)`.
@@ -51,11 +62,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Split Payment Dust Recipient Guard** — `create_split_payment()` rejects any recipient whose computed share falls below an admin-configured `min_split_amount` floor, preventing dust splits from bloating ledger storage. Enforced via `set_min_split_amount()` / `get_min_split_amount()` (see commit `061aeeb`).
 
+### Deprecated
+<!-- Add upcoming removals here. -->
+
+### Removed
+<!-- Add removed features here. -->
+
+### Security
+<!-- Add security fixes here. -->
+
 ---
 
 ## [Previous Versions]
 
-For detailed information on previous releases, see the [Root README](README.md) and individual contract READMEs in the `contracts/` directory.
+For detailed information on previous releases, see the [Root README](README.md) and the [Payment](core/contracts/payment/README.md),
+[Escrow](core/contracts/escrow/README.md), [Refund](core/contracts/refund/README.md)
+and [Admin](orchestrator/contracts/admin/README.md) contract references.
 
 ---
 

@@ -4,7 +4,7 @@ A Soroban smart contract on Stellar for processing and managing refunds. Support
 
 ## 📋 Prerequisites
 
-Same as the root project — see the [main README](../../README.md) for setup instructions.
+Same as the root project — see the [main README](../../../README.md) for setup instructions.
 
 ## 🚀 Quick Start
 
@@ -18,7 +18,7 @@ cargo test -p refund
 
 ## ⚠️ Error Codes
 
-The refund contract defines a set of numeric error codes in [src/lib.rs](src/lib.rs). For a complete reference of every error variant, see [ERRORS.md](ERRORS.md).
+The refund contract defines a set of numeric error codes in [src/lib.rs](src/lib.rs). For a complete reference of every error variant, see [protocol error codes](../../../docs/ERROR_CODES.md).
 
 ## 🏷️ Refund Reason Codes
 
@@ -675,6 +675,20 @@ pub struct ArbitrationStake {
 
 - `get_arbitration_stake_config()` — Returns the active `Option<ArbitrationStakeConfig>`.
 
+## Lifecycle and operating guides
+
+- **Refunds** use `request_refund`, `approve_refund`, and `process_refund`.
+  Track request status, approval and actual token settlement separately.
+- **Arbitration and appeals** use `file_appeal`, `resolve_appeal` and
+  `escalate_appeal_to_orchestrator`. See the
+  [arbitration workflow](#-arbitration-workflow).
+- **Reputation** uses `get_arbitrator_reputation` and `get_top_arbitrators`.
+  Ranking uses Bayesian smoothing of majority-vote history.
+- **Migrations** use `migrate_schema_step` and `get_migration_cursor`.
+  See [storage versioning](../../../docs/STORAGE_VERSIONING.md).
+
+See the [glossary](../../../docs/GLOSSARY.md) and [changelog](../../../CHANGELOG.md).
+
 ## 🔗 Links
 
-- [Root README](../../README.md)
+- [Root README](../../../README.md)

@@ -19,7 +19,7 @@ Do these ahead of time. During an incident there is no time to set up keys.
 - [ ] The pauser address is a member of the multisig admin list on the **payment** and **escrow** contracts, and is the admin of the **refund** contract. `emergency_pause_all` forwards the pauser address to each child contract. If any child rejects it, **the whole call reverts and nothing is paused** (see [§2.3](#23-fallback-pause-each-contract-directly)).
 - [ ] The **admin** identity for the admin contract (used to repoint child contracts after an upgrade) is available.
 - [ ] Contract IDs are recorded below and in the team password manager.
-- [ ] A keeper or cron job calls `ping` on the admin contract at least every few weeks so its instance TTL never lapses (see [§6](#6-keeping-contracts-alive-ttl)).
+- [ ] A keeper monitors and extends admin instance TTL before archival (see [storage restoration](STORAGE_RESTORATION.md)).
 - [ ] Storage layout and archival recovery procedures reviewed against [STORAGE_VERSIONING.md](./STORAGE_VERSIONING.md) and [STORAGE_RESTORATION.md](./STORAGE_RESTORATION.md).
 
 ### Environment variables used in this runbook
@@ -84,7 +84,7 @@ The `reason` string is written to each child contract's `PauseState` and pause h
 | `Error(Contract, #3)` `Unauthorized` | `--pauser` is not the stored pauser | Check `$PAUSER_ADDR`, use the correct identity |
 | Auth / signature error | Source account didn't sign for the pauser | Make sure `--source-account` is the pauser identity |
 | Child contract error (e.g. `Unauthorized`, `MultiSigNotInitialized`) | Pauser is not an admin on that child | The whole transaction reverted. Use [§2.3](#23-fallback-pause-each-contract-directly) |
-| Entry archived | Admin contract instance TTL lapsed | `stellar contract restore --id $ADMIN_ID ...`, then retry (see [§6](#6-keeping-contracts-alive-ttl) and [STORAGE_RESTORATION.md](./STORAGE_RESTORATION.md)) |
+| Entry archived | Admin contract instance TTL lapsed | `stellar contract restore --id $ADMIN_ID ...`, then retry (see [storage restoration](STORAGE_RESTORATION.md)) |
 
 ### 2.3 Fallback: pause each contract directly
 
