@@ -5,6 +5,10 @@ use soroban_sdk::{
 };
 
 pub mod reentrancy;
+mod buyer_protection;
+pub use buyer_protection::{BuyerProtectionConfig, BuyerProtectionPaid};
+mod rma;
+pub use rma::RmaRequirement;
 pub mod storage;
 #[path = "../../escrow/src/fixed_math.rs"]
 pub mod fixed_math;
@@ -58,6 +62,16 @@ pub fn make_key(
 #[derive(Clone, Debug, PartialEq)]
 #[contracttype]
 pub enum DataKey {
+    RefundRma(u64),
+    RmaAttestation(u64),
+    RmaQuotaPeriod(u64),
+    MerchantQuotaResetCount(Address),
+    BuyerProtectionConfig,
+    BuyerProtectionBalance(Address),
+    MerchantProtectionDebt(Address, Address),
+    ProtectionDebtCount(Address),
+    GuaranteePayout(u64),
+    SupremeSourceStatus(u64),
     Admin,
     Refund(u64),
     RefundCounter,
@@ -302,6 +316,7 @@ pub enum RefundStatus {
     Approved,
     Rejected,
     Processed,
+    ProcessedViaGuarantee,
     PendingAppeal,
     // Issue #64: distinct terminal state for a refund whose denial was
     // confirmed on appeal (the appeal was "upheld" in favor of the
@@ -500,6 +515,11 @@ pub enum ExtError {
     InsufficientArbitratorStake = 71,
     /// The admin rotation delay has not elapsed.
     AdminRotationDelayNotElapsed = 72,
+    RmaDeliveryPending = 73,
+    ReentrantCallDetected = 74,
+    BuyerProtectionUnavailable = 75,
+    RefundStillFunded = 76,
+    RefundInsolvent = 77,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -3323,10 +3343,15 @@ impl RefundContract {
         if refund.status != RefundStatus::PendingAppeal && refund.status != RefundStatus::Rejected {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
+        let source = refund.status.clone();
+        Self::remove_from_status_index(&env, source.clone(), refund_id)?;
+        env.storage().instance().set(&DataKey::SupremeSourceStatus(refund_id), &source);
         refund.status = RefundStatus::EscalatedToSupremeCouncil;
         env.storage()
             .instance()
             .set(&DataKey::Refund(refund_id), &refund);
+
+        Self::add_to_status_index(&env, RefundStatus::EscalatedToSupremeCouncil, refund_id);
 
         (SupremeEscalationEvent {
             refund_id,
@@ -3817,6 +3842,12 @@ impl RefundContract {
             .instance()
             .get(&DataKey::MerchantRefundQuota(merchant.clone()))
             .ok_or(Error::Core(CoreError::PolicyNotFound))?;
+        let reset_key = DataKey::MerchantQuotaResetCount(merchant.clone());
+        let reset_count: u64 = env.storage().instance().get(&reset_key).unwrap_or(0);
+        let next_reset = reset_count
+            .checked_add(1)
+            .ok_or(Error::Core(CoreError::InvalidAmount))?;
+        env.storage().instance().set(&reset_key, &next_reset);
         quota.used = 0;
         quota.period_start = env.ledger().timestamp();
         env.storage()
@@ -4399,7 +4430,9 @@ impl RefundContract {
             .instance()
             .get(&DataKey::Refund(case.refund_id))
             .unwrap();
-        if approved {
+        // A late arbitration outcome may settle the panel's fees, but a
+        // guarantee-paid refund is final even if the panel also approves it.
+        if approved && !env.storage().instance().has(&DataKey::GuaranteePayout(case.refund_id)) {
             Self::record_merchant_quota_usage(&env, &refund.merchant, refund.amount)?;
             Self::mark_arbitration_award(&env, case.refund_id);
             // Move the refund in the status index too, or process_refund
@@ -4819,7 +4852,9 @@ impl RefundContract {
             .instance()
             .set(&ArbitrationKey::ArbitrationCase(case_id), &case);
 
-        if approved {
+        // A late arbitration outcome may settle the panel's fees, but a
+        // guarantee-paid refund is final even if the panel also approves it.
+        if approved && !env.storage().instance().has(&DataKey::GuaranteePayout(case.refund_id)) {
             let mut refund: Refund = env
                 .storage()
                 .instance()
@@ -5975,11 +6010,12 @@ impl RefundContract {
         if fee <= 0 {
             return payout;
         }
+        let allocated = Self::allocate_protection_fee(env, token, fee);
         let fees_key = ConfigKey::AccumulatedFees(token.clone());
         let accumulated: i128 = env.storage().instance().get(&fees_key).unwrap_or(0);
         env.storage()
             .instance()
-            .set(&fees_key, &accumulated.saturating_add(fee));
+            .set(&fees_key, &accumulated.saturating_add(fee - allocated));
 
         let net_award = payout - fee;
         ProtocolFeeCollected {
@@ -6200,6 +6236,9 @@ impl RefundContract {
             } else {
                 config.fee_token.clone()
             };
+            if fee_token != *token && Self::unreserved_refund_balance(env, &fee_token) < split.total_fee {
+                return Err(Error::Ext(ExtError::RefundInsolvent));
+            }
             token::Client::new(env, &fee_token).transfer(
                 &env.current_contract_address(),
                 &config.treasury,
@@ -6602,7 +6641,7 @@ impl RefundContract {
                         RefundStatus::Rejected => {
                             total_rejected += 1;
                         }
-                        RefundStatus::Processed => {
+                        RefundStatus::Processed | RefundStatus::ProcessedViaGuarantee => {
                             total_amount_refunded += refund.amount;
                         }
                         RefundStatus::Requested => {
@@ -6916,7 +6955,7 @@ impl RefundContract {
                 .instance()
                 .get::<_, Refund>(&DataKey::Refund(id))
             {
-                if refund.payment_id == payment_id && refund.status == RefundStatus::Processed {
+                if refund.payment_id == payment_id && matches!(refund.status, RefundStatus::Processed | RefundStatus::ProcessedViaGuarantee) {
                     total += refund.amount;
                 }
             }
@@ -7440,6 +7479,11 @@ impl RefundContract {
             .get(&DataKey::Refund(refund_id))
             .ok_or(Error::Core(CoreError::RefundNotFound))?;
 
+        Self::require_no_guarantee_payout(&env, refund_id)?;
+        if new_status == RefundStatus::ProcessedViaGuarantee {
+            return Err(Error::Core(CoreError::InvalidStatus));
+        }
+
         // Apply override
         refund.status = new_status.clone();
         refund.amount = new_amount;
@@ -7828,7 +7872,7 @@ impl RefundContract {
         // Merkle accumulator as the SHA-256 of its XDR.
         if matches!(
             status,
-            RefundStatus::Processed | RefundStatus::Rejected | RefundStatus::PermanentlyDenied
+            RefundStatus::Processed | RefundStatus::ProcessedViaGuarantee | RefundStatus::Rejected | RefundStatus::PermanentlyDenied
         ) {
             if let Some(refund) = env
                 .storage()
@@ -8486,7 +8530,7 @@ impl RefundContract {
                 | RefundStatus::EscalatedToSupremeCouncil => true,
                 RefundStatus::Rejected
                 | RefundStatus::PermanentlyDenied
-                | RefundStatus::Processed => false,
+                | RefundStatus::Processed | RefundStatus::ProcessedViaGuarantee => false,
             };
             if active {
                 return Err(Error::Ext(ExtError::ActiveRefundExists));
@@ -8796,6 +8840,20 @@ impl RefundContract {
         // Reserve merchant quota at approval time, in the same step that flips
         // the status, so approved-but-unprocessed refunds count against it.
         Self::reserve_merchant_quota(env, &refund.merchant, refund.amount)?;
+        if env.storage().instance().has(&DataKey::RefundRma(refund_id)) {
+            if let Some(quota) = Self::get_merchant_refund_quota(env, refund.merchant.clone()) {
+                let reset_count: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::MerchantQuotaResetCount(refund.merchant.clone()))
+                    .unwrap_or(0);
+                env.storage().instance().set(
+                    &DataKey::RmaQuotaPeriod(refund_id),
+                    &(quota.period_start, reset_count),
+                );
+            }
+        }
+
 
         Self::remove_from_status_index(env, RefundStatus::Requested, refund_id)?;
         let mut profile = Self::get_customer_refund_profile(env.clone(), refund.customer.clone());
@@ -8964,6 +9022,9 @@ impl RefundContract {
             .get(&DataKey::Refund(refund_id))
             .ok_or(Error::Core(CoreError::RefundNotFound))?;
 
+        Self::require_rma_delivery(env, refund_id)?;
+        Self::require_no_guarantee_payout(env, refund_id)?;
+
         if refund.status != RefundStatus::Approved {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
@@ -8987,6 +9048,13 @@ impl RefundContract {
             refund.amount,
             refund.original_payment_amount,
         )?;
+
+        if env.storage().instance().has(&VoucherKey::RefundVoucherIssued(refund_id)) {
+            return Err(Error::Core(CoreError::InvalidStatus));
+        }
+        if !Self::refund_funding_available(env, &refund) {
+            return Err(Error::Ext(ExtError::RefundInsolvent));
+        }
 
         // Deduct platform fee from refund amount. Issue #71: `fee` carries the
         // reconciled processing/network breakdown that goes out on the event.
@@ -10497,13 +10565,13 @@ impl RefundContract {
                     .get::<_, Refund>(&DataKey::Refund(refund_id))
                 {
                     match refund.status {
-                        RefundStatus::Approved | RefundStatus::Processed => {
+                        RefundStatus::Approved | RefundStatus::Processed | RefundStatus::ProcessedViaGuarantee => {
                             total_approved += 1;
                         }
                         _ => {}
                     }
 
-                    if refund.status == RefundStatus::Processed {
+                    if matches!(refund.status, RefundStatus::Processed | RefundStatus::ProcessedViaGuarantee) {
                         total_amount_refunded += refund.amount;
 
                         // Calculate processing time if we have both timestamps
@@ -10862,6 +10930,9 @@ impl RefundContract {
 
     /// Returns a merchant's standing, defaulting to `Active` when unset.
     pub fn get_merchant_status(env: Env, merchant: Address) -> MerchantStatus {
+        if Self::protection_debt_active(&env, &merchant) {
+            return MerchantStatus::Suspended;
+        }
         env.storage()
             .instance()
             .get(&EligibilityKey::MerchantStatus(merchant))
@@ -12289,6 +12360,9 @@ impl RefundContract {
             .ok_or(Error::Core(CoreError::RefundNotFound))?;
 
         // Validate refund status is Approved
+        Self::require_rma_delivery(&env, refund_id)?;
+        Self::require_no_guarantee_payout(&env, refund_id)?;
+
         if refund.status != RefundStatus::Approved {
             return Err(Error::Core(CoreError::InvalidAmount));
         }
@@ -12399,6 +12473,9 @@ impl RefundContract {
             return Err(Error::Ext(ExtError::VoucherExpired));
         }
 
+        if Self::unreserved_refund_balance(&env, &voucher.token) < voucher.amount {
+            return Err(Error::Ext(ExtError::RefundInsolvent));
+        }
         token::Client::new(&env, &voucher.token).transfer(
             &env.current_contract_address(),
             &customer,
@@ -12460,6 +12537,10 @@ impl RefundContract {
             return Err(Error::Core(CoreError::InvalidAmount));
         }
 
+        if Self::unreserved_refund_balance(&env, &voucher.token) < amount {
+            return Err(Error::Ext(ExtError::RefundInsolvent));
+        }
+
         token::Client::new(&env, &voucher.token).transfer(
             &env.current_contract_address(),
             &customer,
@@ -12514,7 +12595,11 @@ impl RefundContract {
                 .instance()
                 .get::<_, RefundVoucher>(&VoucherKey::Voucher(voucher_id))
             {
-                if !voucher.redeemed && voucher.remaining_balance > 0 && now > voucher.expires_at {
+                if !voucher.redeemed
+                    && voucher.remaining_balance > 0
+                    && now > voucher.expires_at
+                    && Self::unreserved_refund_balance(&env, &voucher.token) >= voucher.remaining_balance
+                {
                     let amount = voucher.remaining_balance;
                     token::Client::new(&env, &voucher.token).transfer(
                         &env.current_contract_address(),
@@ -13296,6 +13381,10 @@ impl RefundContract {
 mod test;
 mod test_policy;
 mod test_process;
+#[cfg(test)]
+mod test_rma;
+#[cfg(test)]
+mod test_buyer_protection;
 mod test_rate_limit;
 
 #[cfg(test)]
