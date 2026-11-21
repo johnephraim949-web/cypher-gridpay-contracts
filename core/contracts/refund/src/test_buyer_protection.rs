@@ -57,6 +57,15 @@ fn guarantee_caps_exposure_blocks_double_payment_and_repayment_restores_eligibil
         client.get_refund(&ids[0]).status,
         RefundStatus::ProcessedViaGuarantee
     );
+    assert!(client
+        .try_admin_override_policy(
+            &admin,
+            &ids[0],
+            &RefundStatus::Approved,
+            &200,
+            &String::from_str(&env, "retry"),
+        )
+        .is_err());
     assert!(client.try_process_refund(&admin, &ids[0]).is_err());
     assert!(client
         .try_claim_buyer_protection_payout(&customer, &ids[0])

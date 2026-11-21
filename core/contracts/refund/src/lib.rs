@@ -70,6 +70,7 @@ pub enum DataKey {
     BuyerProtectionBalance(Address),
     MerchantProtectionDebt(Address, Address),
     ProtectionDebtCount(Address),
+    GuaranteePayout(u64),
     SupremeSourceStatus(u64),
     Admin,
     Refund(u64),
@@ -4429,7 +4430,9 @@ impl RefundContract {
             .instance()
             .get(&DataKey::Refund(case.refund_id))
             .unwrap();
-        if approved {
+        // A late arbitration outcome may settle the panel's fees, but a
+        // guarantee-paid refund is final even if the panel also approves it.
+        if approved && !env.storage().instance().has(&DataKey::GuaranteePayout(case.refund_id)) {
             Self::record_merchant_quota_usage(&env, &refund.merchant, refund.amount)?;
             Self::mark_arbitration_award(&env, case.refund_id);
             // Move the refund in the status index too, or process_refund
@@ -4849,7 +4852,9 @@ impl RefundContract {
             .instance()
             .set(&ArbitrationKey::ArbitrationCase(case_id), &case);
 
-        if approved {
+        // A late arbitration outcome may settle the panel's fees, but a
+        // guarantee-paid refund is final even if the panel also approves it.
+        if approved && !env.storage().instance().has(&DataKey::GuaranteePayout(case.refund_id)) {
             let mut refund: Refund = env
                 .storage()
                 .instance()
@@ -7474,6 +7479,11 @@ impl RefundContract {
             .get(&DataKey::Refund(refund_id))
             .ok_or(Error::Core(CoreError::RefundNotFound))?;
 
+        Self::require_no_guarantee_payout(&env, refund_id)?;
+        if new_status == RefundStatus::ProcessedViaGuarantee {
+            return Err(Error::Core(CoreError::InvalidStatus));
+        }
+
         // Apply override
         refund.status = new_status.clone();
         refund.amount = new_amount;
@@ -9013,6 +9023,7 @@ impl RefundContract {
             .ok_or(Error::Core(CoreError::RefundNotFound))?;
 
         Self::require_rma_delivery(env, refund_id)?;
+        Self::require_no_guarantee_payout(env, refund_id)?;
 
         if refund.status != RefundStatus::Approved {
             return Err(Error::Core(CoreError::InvalidStatus));
@@ -12350,6 +12361,7 @@ impl RefundContract {
 
         // Validate refund status is Approved
         Self::require_rma_delivery(&env, refund_id)?;
+        Self::require_no_guarantee_payout(&env, refund_id)?;
 
         if refund.status != RefundStatus::Approved {
             return Err(Error::Core(CoreError::InvalidAmount));

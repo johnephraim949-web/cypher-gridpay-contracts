@@ -199,6 +199,7 @@ impl RefundContract {
         {
             return Err(Error::Core(CoreError::InvalidStatus));
         }
+        Self::require_no_guarantee_payout(&env, refund_id)?;
         Self::require_rma_delivery(&env, refund_id)?;
         Self::can_refund_payment(
             &env,
@@ -245,6 +246,9 @@ impl RefundContract {
             &(pool - amount),
         );
 
+        env.storage()
+            .instance()
+            .set(&DataKey::GuaranteePayout(refund_id), &amount);
         env.storage().instance().remove(&award);
         Self::remove_from_status_index(&env, RefundStatus::Approved, refund_id)?;
         refund.status = RefundStatus::ProcessedViaGuarantee;
@@ -293,6 +297,17 @@ impl RefundContract {
             &env.current_contract_address(),
             &amount,
         );
+        Ok(())
+    }
+
+    pub(super) fn require_no_guarantee_payout(env: &Env, refund_id: u64) -> Result<(), Error> {
+        if env
+            .storage()
+            .instance()
+            .has(&DataKey::GuaranteePayout(refund_id))
+        {
+            return Err(Error::Core(CoreError::AlreadyProcessed));
+        }
         Ok(())
     }
 
