@@ -167,6 +167,7 @@ deployment details.
 
 ## 🔗 Links
 
+- [Merchant Integration Guide](docs/MERCHANT_INTEGRATION_GUIDE.md)
 - [TypeScript SDK](sdk/typescript/README.md)
 - [Python SDK](docs/PYTHON_SDK.md)
 - [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
