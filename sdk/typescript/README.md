@@ -7,6 +7,11 @@ This package is **generated output**. Everything under `src/generated/` is
 produced by [`scripts/generate-ts-bindings.sh`](../../scripts/generate-ts-bindings.sh)
 from the compiled contract WASM — do not hand-edit it.
 
+> **Full cookbook:** see [`docs/TYPESCRIPT_SDK.md`](../../docs/TYPESCRIPT_SDK.md)
+> for the complete browser/Node integration guide (clients, transaction
+> lifecycle, error decoding, event streaming, `BigInt` handling, and runnable
+> examples under [`examples/typescript/`](../../examples/typescript/)).
+
 ## Install
 
 ```bash
@@ -14,6 +19,33 @@ npm install @cypher-gridpay/contracts-sdk @stellar/stellar-sdk
 ```
 
 `@stellar/stellar-sdk` is a peer dependency (`>=13`); the SDK does not bundle it.
+
+### ESM / CJS
+
+The package ships both ESM (`import`) and CommonJS (`require`) entry points via
+conditional `exports`. Node.js `>=18` is required (native `BigInt`, `fetch`).
+
+```ts
+// ESM / TypeScript
+import { PaymentsClient, decodeGridPayError } from "@cypher-gridpay/contracts-sdk";
+```
+
+```js
+// CommonJS
+const { PaymentsClient } = require("@cypher-gridpay/contracts-sdk");
+```
+
+### Vite / Webpack polyfills
+
+`@stellar/stellar-sdk` relies on a few Node globals. In browser bundlers add:
+
+- **Vite** — `npm i -D vite-plugin-node-polyfills`, then in `vite.config.ts`:
+  ```ts
+  import { nodePolyfills } from "vite-plugin-node-polyfills";
+  export default { plugins: [nodePolyfills({ globals: { Buffer: true, global: true } })] };
+  ```
+- **Webpack 5** — set `resolve.fallback = { buffer: require.resolve("buffer/"), stream: require.resolve("stream-browserify") }`
+  and add `new webpack.ProvidePlugin({ Buffer: ["buffer", "Buffer"] })`.
 
 ## Generate from source
 
@@ -25,6 +57,9 @@ cd cypher-gridpay-contracts/sdk/typescript
 npm install
 npm run build
 ```
+
+Re-run `./scripts/generate-ts-bindings.sh` whenever you test against a custom
+local contract fork so the generated `.d.ts` matches the deployed WASM.
 
 ## Usage
 
