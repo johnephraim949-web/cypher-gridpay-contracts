@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Checkout widget initial JS (gzip)",
+    "path": "dist/widget/*.js",
+    "gzip": true,
+    "limit": "120 KB"
+  },
+  {
+    "name": "Web app shell initial JS (gzip)",
+    "path": "dist/assets/index-*.js",
+    "gzip": true,
+    "limit": "250 KB"
+  }
+]

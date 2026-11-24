@@ -1,0 +1,12 @@
+global:
+  network: mainnet
+  # Replace with your dedicated RPC endpoint (see infra/terraform soroban-rpc module).
+  sorobanRpcUrl: https://soroban-rpc.internal.example.invalid
+  networkPassphrase: "Public Global Stellar Network ; September 2015"
+externalSecrets:
+  remoteRefs:
+    databaseUrl: gridpay/production/database-url
+    redisUrl: gridpay/production/redis-url
+    signerKmsKeyId: gridpay/production/signer-kms-key-id
+networkPolicy:
+  egressCIDRs: ["10.0.0.0/8"]   # internal VPC (RPC, Postgres, Redis); tighten per environment

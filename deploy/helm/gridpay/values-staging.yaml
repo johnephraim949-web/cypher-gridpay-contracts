@@ -1,0 +1,9 @@
+global:
+  network: testnet
+  sorobanRpcUrl: https://soroban-testnet.stellar.org
+  networkPassphrase: "Test SDF Network ; September 2015"
+externalSecrets:
+  remoteRefs:
+    databaseUrl: gridpay/staging/database-url
+    redisUrl: gridpay/staging/redis-url
+    signerKmsKeyId: gridpay/staging/signer-kms-key-id

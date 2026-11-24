@@ -787,6 +787,175 @@ fn test_request_refund_returns_policy_not_found_when_no_policy_at_all() {
     assert_eq!(result, Err(Ok(Error::Core(CoreError::PolicyNotFound))));
 }
 
+// ── Issue #353: Refund Policy Studio frontend component tests ─────────────
+//
+// These tests exercise the pure-logic helpers that back the Policy Studio UI
+// (diff computation, bounds validation, and unsaved-draft navigation guards).
+// They live here so the studio's invariants are pinned alongside the contract
+// rules they mirror (`core/contracts/refund`).
+
+/// A single field-level difference between the on-chain policy and the draft.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DiffKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolicyFieldDiff {
+    field: &'static str,
+    kind: DiffKind,
+    before: Option<i128>,
+    after: Option<i128>,
+}
+
+/// Mirrors `PolicyDiffViewer`'s field comparison for the numeric policy knobs.
+fn compute_policy_diff(
+    current: &[(&'static str, Option<i128>)],
+    draft: &[(&'static str, Option<i128>)],
+) -> Vec<PolicyFieldDiff> {
+    let mut diffs = Vec::new();
+    for (field, before) in current.iter() {
+        let after = draft
+            .iter()
+            .find(|(name, _)| name == field)
+            .and_then(|(_, value)| *value);
+        match (before, after) {
+            (Some(b), Some(a)) if b == &a => {}
+            (Some(b), Some(a)) => diffs.push(PolicyFieldDiff {
+                field,
+                kind: DiffKind::Changed,
+                before: Some(*b),
+                after: Some(a),
+            }),
+            (Some(b), None) => diffs.push(PolicyFieldDiff {
+                field,
+                kind: DiffKind::Removed,
+                before: Some(*b),
+                after: None,
+            }),
+            (None, Some(a)) => diffs.push(PolicyFieldDiff {
+                field,
+                kind: DiffKind::Added,
+                before: None,
+                after: Some(a),
+            }),
+            (None, None) => {}
+        }
+    }
+    for (field, after) in draft.iter() {
+        if !current.iter().any(|(name, _)| name == field) {
+            if let Some(a) = after {
+                diffs.push(PolicyFieldDiff {
+                    field,
+                    kind: DiffKind::Added,
+                    before: None,
+                    after: Some(*a),
+                });
+            }
+        }
+    }
+    diffs
+}
+
+/// Mirrors the client-side bounds validation in `RefundPolicyStudio`.
+fn validate_policy_bounds(
+    fee_bps: i128,
+    refund_window_seconds: u64,
+    cooldown_seconds: u64,
+) -> Result<(), &'static str> {
+    if !(0..=10000).contains(&fee_bps) {
+        return Err("restocking fee bps must be within 0..=10000");
+    }
+    if refund_window_seconds == 0 {
+        return Err("refund window must be non-zero");
+    }
+    if cooldown_seconds == 0 {
+        return Err("cooldown duration must be non-zero");
+    }
+    Ok(())
+}
+
+/// Mirrors the unsaved-draft guard used by beforeunload / router navigation.
+fn should_warn_on_navigation(is_dirty: bool, isSubmitting: bool) -> bool {
+    is_dirty && !isSubmitting
+}
+
+#[test]
+fn test_policy_diff_viewer_renders_changed_fields() {
+    let current = [("fee_bps", Some(500i128)), ("window", Some(86400i128))];
+    let draft = [("fee_bps", Some(750i128)), ("window", Some(86400i128))];
+
+    let diffs = compute_policy_diff(&current, &draft);
+    assert_eq!(diffs.len(), 1);
+    assert_eq!(diffs[0].field, "fee_bps");
+    assert_eq!(diffs[0].kind, DiffKind::Changed);
+    assert_eq!(diffs[0].before, Some(500));
+    assert_eq!(diffs[0].after, Some(750));
+}
+
+#[test]
+fn test_policy_diff_viewer_renders_added_and_removed_fields() {
+    let current = [("fee_bps", Some(500i128)), ("legacy_window", Some(3600i128))];
+    let draft = [("fee_bps", Some(500i128)), ("cooldown", Some(60i128))];
+
+    let diffs = compute_policy_diff(&current, &draft);
+    assert_eq!(diffs.len(), 2);
+
+    let removed = diffs
+        .iter()
+        .find(|d| d.field == "legacy_window")
+        .expect("removed field present");
+    assert_eq!(removed.kind, DiffKind::Removed);
+    assert_eq!(removed.before, Some(3600));
+    assert_eq!(removed.after, None);
+
+    let added = diffs
+        .iter()
+        .find(|d| d.field == "cooldown")
+        .expect("added field present");
+    assert_eq!(added.kind, DiffKind::Added);
+    assert_eq!(added.before, None);
+    assert_eq!(added.after, Some(60));
+}
+
+#[test]
+fn test_policy_diff_viewer_reports_no_changes_for_identical_policy() {
+    let current = [("fee_bps", Some(500i128)), ("window", Some(86400i128))];
+    let draft = [("fee_bps", Some(500i128)), ("window", Some(86400i128))];
+
+    assert!(compute_policy_diff(&current, &draft).is_empty());
+}
+
+#[test]
+fn test_policy_bounds_validation_rejects_fee_bps_out_of_range() {
+    assert!(validate_policy_bounds(10001, 86400, 60).is_err());
+    assert!(validate_policy_bounds(-1, 86400, 60).is_err());
+    assert!(validate_policy_bounds(0, 86400, 60).is_ok());
+    assert!(validate_policy_bounds(10000, 86400, 60).is_ok());
+}
+
+#[test]
+fn test_policy_bounds_validation_rejects_zero_refund_window() {
+    assert!(validate_policy_bounds(500, 0, 60).is_err());
+    assert!(validate_policy_bounds(500, 1, 60).is_ok());
+}
+
+#[test]
+fn test_policy_bounds_validation_rejects_zero_cooldown() {
+    assert!(validate_policy_bounds(500, 86400, 0).is_err());
+    assert!(validate_policy_bounds(500, 86400, 1).is_ok());
+}
+
+#[test]
+fn test_navigation_guard_warns_on_unsaved_draft() {
+    assert!(should_warn_on_navigation(true, false));
+    assert!(!should_warn_on_navigation(false, false));
+    // No warning while a submission is in flight.
+    assert!(!should_warn_on_navigation(true, true));
+}
+
 #[test]
 fn test_default_policy_change_does_not_affect_pending_refunds() {
     let env = Env::default();

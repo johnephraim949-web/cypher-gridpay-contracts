@@ -77,6 +77,66 @@ where
     extend_persistent(env, key);
 }
 
+pub const MAX_INSTANCE_STORAGE_BYTES: u32 = 4_096;
+
+pub const SHARD_CAPACITY: u32 = 32;
+
+fn shard_count(count: u32) -> u32 {
+    count.div_ceil(SHARD_CAPACITY)
+}
+
+pub fn read_sharded<T, CK, SK, F>(env: &Env, count_key: &CK, shard_key: F) -> Option<Vec<T>>
+where
+    T: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+    CK: IntoVal<Env, Val>,
+    SK: IntoVal<Env, Val>,
+    F: Fn(u32) -> SK,
+{
+    let count: u32 = env.storage().instance().get(count_key)?;
+    let mut items = Vec::new(env);
+    for shard in 0..shard_count(count) {
+        if let Some(part) = get_persistent::<SK, Vec<T>>(env, &shard_key(shard)) {
+            items.append(&part);
+        }
+    }
+    Some(items)
+}
+
+pub fn write_sharded<T, CK, SK, F>(env: &Env, count_key: &CK, shard_key: F, items: &Vec<T>)
+where
+    T: IntoVal<Env, Val> + TryFromVal<Env, Val>,
+    CK: IntoVal<Env, Val>,
+    SK: IntoVal<Env, Val>,
+    F: Fn(u32) -> SK,
+{
+    let old_count: u32 = env.storage().instance().get(count_key).unwrap_or(0);
+    let count = items.len();
+    for shard in 0..shard_count(count) {
+        let start = shard * SHARD_CAPACITY;
+        let end = (start + SHARD_CAPACITY).min(count);
+        set_persistent(env, &shard_key(shard), &items.slice(start..end));
+    }
+    for shard in shard_count(count)..shard_count(old_count) {
+        env.storage().persistent().remove(&shard_key(shard));
+    }
+    env.storage().instance().set(count_key, &count);
+}
+
+#[cfg(test)]
+pub fn instance_storage_xdr_len(env: &Env, contract: &soroban_sdk::Address) -> u32 {
+    use soroban_sdk::{testutils::storage::Instance as _, xdr::ToXdr};
+    env.as_contract(contract, || env.storage().instance().all().to_xdr(env).len())
+}
+
+#[cfg(test)]
+pub fn assert_instance_storage_within_budget(env: &Env, contract: &soroban_sdk::Address) {
+    let len = instance_storage_xdr_len(env, contract);
+    assert!(
+        len < MAX_INSTANCE_STORAGE_BYTES,
+        "instance storage is {len} bytes, budget is {MAX_INSTANCE_STORAGE_BYTES}"
+    );
+}
+
 /// Depth of the archived-record Merkle accumulator (Issue #243): up to 2^20
 /// leaves, with a frontier of 20 * 32 = 640 bytes.
 pub const MERKLE_TREE_DEPTH: u32 = 20;
@@ -182,4 +242,35 @@ pub fn verify_archived_record_inclusion(
         position >>= 1;
     }
     node == imt.root
+}
+
+// ============================================================================
+// PREPAID VAULT STORAGE
+// ============================================================================
+
+#[derive(Clone)]
+#[contracttype]
+pub enum PrepaidVaultKey {
+    Vault(u64),
+    Counter,
+}
+
+pub fn set_prepaid_vault<V>(env: &Env, key: &PrepaidVaultKey, value: &V)
+where
+    V: IntoVal<Env, Val>,
+{
+    set_persistent(env, key, value);
+}
+
+pub fn get_prepaid_vault<V>(env: &Env, key: &PrepaidVaultKey) -> Option<V>
+where
+    V: TryFromVal<Env, Val>,
+{
+    get_persistent(env, key)
+}
+
+pub fn bump_prepaid_vault(env: &Env, key: &PrepaidVaultKey) {
+    if has_persistent(env, key) {
+        extend_persistent(env, key);
+    }
 }

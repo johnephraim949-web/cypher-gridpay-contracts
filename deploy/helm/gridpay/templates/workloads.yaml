@@ -1,0 +1,125 @@
+{{- range $name, $s := .Values.services }}
+{{- if $s.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+    {{- include "gridpay.labels" $ | nindent 4 }}
+spec:
+  {{- if not (and $s.hpa $s.hpa.enabled) }}
+  replicas: {{ $s.replicas }}
+  {{- end }}
+  strategy:
+    {{- if eq $name "indexer" }}
+    type: Recreate   # single active leader: never run two indexers during a rollout
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+    {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ $name }}
+        {{- include "gridpay.labels" $ | nindent 8 }}
+      {{- if eq $name "crank-worker" }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $s.port | quote }}
+        prometheus.io/path: {{ $s.metricsPath | default "/metrics" }}
+      {{- end }}
+    spec:
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ $name }}
+          image: "{{ $.Values.global.imageRegistry }}/{{ $s.image }}:{{ $s.tag }}"
+          ports:
+            - name: http
+              containerPort: {{ $s.port }}
+          env:
+            - name: STELLAR_NETWORK
+              value: {{ $.Values.global.network | quote }}
+            - name: SOROBAN_RPC_URL
+              value: {{ $.Values.global.sorobanRpcUrl | quote }}
+            - name: NETWORK_PASSPHRASE
+              value: {{ $.Values.global.networkPassphrase | quote }}
+            {{- range $k, $v := $s.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          {{- if $.Values.externalSecrets.enabled }}
+          envFrom:
+            - secretRef:
+                name: gridpay-secrets
+          {{- end }}
+          startupProbe:
+            tcpSocket: {port: http}
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 20
+            failureThreshold: 3
+          securityContext:
+            {{- toYaml $.Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml $s.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ $name }}
+  ports:
+    - name: http
+      port: {{ $s.port }}
+      targetPort: http
+{{- if and $s.hpa $s.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $name }}}
+  minReplicas: {{ $s.hpa.minReplicas }}
+  maxReplicas: {{ $s.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target: {type: Utilization, averageUtilization: {{ $s.hpa.cpu }}}
+{{- end }}
+{{- if and $s.pdb $s.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+spec:
+  minAvailable: {{ $s.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+{{- end }}
+{{- end }}
+{{- end }}

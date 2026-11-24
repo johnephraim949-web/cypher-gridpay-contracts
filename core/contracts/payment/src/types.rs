@@ -94,6 +94,38 @@ pub enum FeeTier {
     Enterprise, // >= configured enterprise volume
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct RebatePool {
+    pub pool_id: u64,
+    pub sponsor: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_funded: i128,
+    pub total_claimed: i128,
+    pub expires_at: u64,
+pub enum RoundingMode {
+    RoundUpToUnit(i128),
+    FixedBps(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct RoundingAddonConfig {
+    pub beneficiary: Address,
+    pub mode: RoundingMode,
+    pub max_addon_amount: i128,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum TokenLifecycleStatus {
+    Active,
+    DrainOnly,
+    Removed,
+}
+
 // ============================================================================
 // TRIAL AND PAUSE DATA
 // ============================================================================
@@ -567,6 +599,22 @@ pub struct MerchantRebateAccrual {
     pub accrued_rebate: i128,
     pub period_start: u64,
     pub period_volume: i128,
+}
+
+// ============================================================================
+// PREPAID VAULTS
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PrepaidVault {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub merchant: Option<Address>,
+    pub token: Address,
+    pub balance: i128,
+    pub expires_at: Option<u64>,
+    pub transferable: bool,
 }
 
 // ============================================================================

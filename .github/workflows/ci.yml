@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: npm
@@ -34,6 +34,32 @@ jobs:
         run: npm test
         working-directory: services/relayer
 
+  web:
+    name: Merchant Web (TypeScript)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: apps/web
+
+      - name: Typecheck web utilities and pages
+        run: npm run typecheck
+        working-directory: apps/web
+
+      - name: Test forwarding loop detection and StrKey validation
+        run: npm test
+        working-directory: apps/web
+
   matrix-test:
     name: Matrix Test (${{ matrix.os }} - Rust ${{ matrix.rust }})
     runs-on: ${{ matrix.os }}
@@ -44,7 +70,7 @@ jobs:
         rust: [stable]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust (${{ matrix.rust }})
         uses: dtolnay/rust-toolchain@stable
@@ -171,10 +197,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: npm
@@ -193,7 +219,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -258,7 +284,7 @@ jobs:
           cat checksums.sha256
 
       - name: Upload SEP-42 WASM & Checksums Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: contract-wasm-checksums
           path: |

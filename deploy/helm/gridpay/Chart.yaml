@@ -1,0 +1,6 @@
+apiVersion: v2
+name: gridpay
+description: Cypher GridPay backend services (api, indexer, webhook-worker, ttl-keeper, relayer, crank-worker, web)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

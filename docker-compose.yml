@@ -1,9 +1,14 @@
-version: "3.8"
-
+# Local standalone Stellar stack (issue #363).
+# Images are pinned by sha256 digest (resolved from Docker Hub on 2026-11-22);
+# the tag is kept for readability. Bump deliberately.
+# NOTE: stellar/soroban-rpc:latest resolves to a single-platform (amd64)
+# manifest, hence the explicit platform below (emulated on Apple Silicon).
+# The healthchecks assume `curl` exists in the images; verify on first run.
 services:
   stellar-quickstart:
-    image: stellar/quickstart:testing
+    image: stellar/quickstart:testing@sha256:228ce30e9e523213c0ed15ec0069283017a183f8745c4676b24c017f311046bf
     container_name: stellar-quickstart
+    restart: unless-stopped
     ports:
       - "8000:8000"
     command: >
@@ -14,17 +19,57 @@ services:
       - ENABLE_SOROBAN_RPC=true
     volumes:
       - stellar-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
 
   soroban-rpc:
-    image: stellar/soroban-rpc:latest
+    image: stellar/soroban-rpc:latest@sha256:8dc0bd7584e17f99d92400e54026922e91e3065925248d074e98a20537f40b13
+    platform: linux/amd64
     container_name: soroban-rpc
+    restart: unless-stopped
     ports:
       - "8001:8000"
     environment:
       - STELLAR_CORE_URL=http://stellar-quickstart:8000
       - NETWORK_PASSPHRASE="Standalone Network ; February 2017"
     depends_on:
-      - stellar-quickstart
+      stellar-quickstart:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}' http://localhost:8000/ | grep -q healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # Optional: `docker compose --profile seed up -d`. Deploys the 4 contracts to
+  # the standalone network and writes /shared/local-manifest.json (the
+  # `gridpay-shared` volume). Requires WASM artifacts built beforehand (`make build`).
+  gridpay-bootstrap:
+    image: stellar/stellar-cli:latest@sha256:bc1073aecfc5dd0974b76331162c7fff09b7793cd8aaa79b3a1d918363937f05
+    profiles: ["seed"]
+    restart: "no"
+    depends_on:
+      soroban-rpc:
+        condition: service_healthy
+    environment:
+      - NETWORK_PASSPHRASE=Standalone Network ; February 2017
+      - RPC_URL=http://soroban-rpc:8000
+      - FRIENDBOT_URL=http://stellar-quickstart:8000/friendbot
+      - SHARED_DIR=/shared
+      - WASM_DIR_CORE=/artifacts/core
+      - WASM_DIR_ORCH=/artifacts/orchestrator
+    volumes:
+      - ./scripts/seed-local.sh:/seed-local.sh:ro
+      - ./core/target/wasm32v1-none/release:/artifacts/core:ro
+      - ./orchestrator/target/wasm32v1-none/release:/artifacts/orchestrator:ro
+      - gridpay-shared:/shared
+    entrypoint: ["/bin/bash", "/seed-local.sh"]
 
 volumes:
   stellar-data:
+  gridpay-shared:

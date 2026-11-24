@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.dependencies]
-soroban-sdk = "23"
+soroban-sdk = "29"
 test_utils = { path = "test_utils" }
 
 [profile.release]
