@@ -1,0 +1,116 @@
+name: Supply Chain Gates
+
+# Issue #365. Strict (no `|| true`) cargo-audit and cargo-deny gates, a hard
+# WASM size budget, and a nightly advisory scan. Added as a NEW workflow because
+# ci.yml is contended; ci.yml's existing non-blocking `cargo audit || true` and
+# 64 KB warning steps still exist and can be removed when maintainers migrate.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  cargo-audit:
+    name: cargo-audit (${{ matrix.workspace }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to Code Scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [core, orchestrator]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit (JSON)
+        working-directory: ${{ matrix.workspace }}
+        # Fail on any vulnerability; JSON is kept for SARIF even on failure.
+        run: |
+          set +e
+          cargo audit --json > ../audit-${{ matrix.workspace }}.json
+          status=$?
+          cargo audit || true
+          exit $status
+
+      - name: Convert to SARIF
+        if: always() && hashFiles(format('audit-{0}.json', matrix.workspace)) != ''
+        run: python3 scripts/audit-to-sarif.py audit-${{ matrix.workspace }}.json audit-${{ matrix.workspace }}.sarif ${{ matrix.workspace }}/Cargo.lock
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles(format('audit-{0}.sarif', matrix.workspace)) != ''
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v3
+        with:
+          sarif_file: audit-${{ matrix.workspace }}.sarif
+          category: cargo-audit-${{ matrix.workspace }}
+
+  cargo-deny:
+    name: cargo-deny (${{ matrix.workspace }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        workspace: [core, orchestrator]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2
+        with:
+          manifest-path: ${{ matrix.workspace }}/Cargo.toml
+          command: check advisories licenses bans sources
+          arguments: --config deny.toml
+
+  wasm-size-budget:
+    name: WASM size budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust (cached)
+        uses: ./.github/actions/setup-rust-cached
+        with:
+          cache-key-suffix: wasm-size
+
+      - name: Build and optimize contracts
+        run: |
+          set -euo pipefail
+          make build
+          for dir in core/target/wasm32v1-none/release orchestrator/target/wasm32v1-none/release; do
+            for w in "$dir"/*.wasm; do
+              [ -f "$w" ] && stellar contract optimize --wasm "$w"
+            done
+          done
+
+      - name: Enforce size budget
+        run: |
+          python3 scripts/check-wasm-size.py .github/wasm-size-budget.json \
+            core/target/wasm32v1-none/release \
+            orchestrator/target/wasm32v1-none/release \
+            --out wasm-sizes.json
+
+      - name: Upload sizes
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-sizes
+          path: wasm-sizes.json
+          if-no-files-found: ignore

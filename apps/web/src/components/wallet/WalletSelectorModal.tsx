@@ -4,6 +4,14 @@
  * Wallet Selector Modal and JIT Micro-Educator Cards for Cypher GridPay.
  * Implements the UX spec in docs/ux/wallet-onboarding-ux.md
  *
+ * i18n / RTL changes (issue #424):
+ *   - All physical CSS direction properties replaced with logical equivalents
+ *     (marginInlineStart/End, paddingInlineStart/End, borderInlineStart,
+ *     textAlign: 'start'/'end', insetInlineStart/End).
+ *   - XLM shortfall value wrapped in dir="ltr" bidi-isolate span so the
+ *     decimal number never reorders inside an RTL sentence.
+ *   - `formatXlmShortfall` used for the shortfall display value.
+ *
  * Exports:
  *   WalletSelectorModal   — The main wallet connection modal.
  *   MissingTrustlineCard  — JIT educator: USDC trustline not established.
@@ -24,6 +32,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { formatXlmShortfall } from "../../utils/formatAmount";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,39 +48,29 @@ export type WalletId =
 export type Platform = "ios" | "android" | "macos" | "windows" | "unknown";
 
 export interface WalletSelectorModalProps {
-  /** Whether the modal is currently open. */
   open: boolean;
-  /** Called when the user selects a wallet option. */
   onSelect: (walletId: WalletId) => void;
-  /** Called when the user closes the modal. */
   onClose: () => void;
-  /**
-   * Map of which wallet extensions are detected in the browser.
-   * Keys are WalletId (excluding "passkey"). Defaults to all false.
-   */
   detectedWallets?: Partial<Record<WalletId, boolean>>;
-  /** Detected platform for Passkey label adaptation. */
   platform?: Platform;
+  /** BCP 47 locale for number formatting. Defaults to navigator.language. */
+  locale?: string;
 }
 
 export interface MissingTrustlineCardProps {
-  /** Called when the user clicks "Enable USDC". */
   onEnable: () => void;
   learnMoreUrl?: string;
 }
 
 export interface LowXlmReserveCardProps {
-  /** How many XLM the user needs to add, computed by the caller. */
   shortfallXlm: number;
-  /** Called when the user clicks "Add XLM to my wallet". */
   onAddXlm: () => void;
   learnMoreUrl?: string;
+  locale?: string;
 }
 
 export interface WrongNetworkCardProps {
-  /** "testnet" if wallet is on testnet but app needs mainnet, or "mainnet" for the reverse. */
   walletNetwork: "testnet" | "mainnet";
-  /** Called when the user clicks "I've switched — reconnect". */
   onReconnect: () => void;
   learnMoreUrl?: string;
 }
@@ -299,11 +298,18 @@ function NetworkIcon({ color }: { color: string }) {
   );
 }
 
-function ChevronRight() {
+/**
+ * Chevron pointing inline-end (→ in LTR, ← in RTL).
+ * dir prop is passed so the icon mirrors in RTL contexts.
+ */
+function ChevronInlineEnd({ dir = "ltr" }: { dir?: "ltr" | "rtl" }) {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+    <svg
+      width="16" height="16" viewBox="0 0 24 24" fill="none"
       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true" focusable="false">
+      aria-hidden="true" focusable="false"
+      style={dir === "rtl" ? { transform: "scaleX(-1)" } : undefined}
+    >
       <polyline points="9 18 15 12 9 6" />
     </svg>
   );
@@ -323,7 +329,8 @@ function ExternalLinkIcon({ color }: { color: string }) {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
       stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-      aria-hidden="true" focusable="false" style={{ flexShrink: 0, marginLeft: 3 }}>
+      aria-hidden="true" focusable="false"
+      style={{ flexShrink: 0, marginInlineStart: 3 }}>
       <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
       <polyline points="15 3 21 3 21 9" />
       <line x1="10" y1="14" x2="21" y2="3" />
@@ -376,7 +383,6 @@ export function WalletSelectorModal({
   const explainerId = useId();
   const [explainerOpen, setExplainerOpen] = useState(false);
 
-  // Save trigger element for focus restoration on close
   useEffect(() => {
     if (open) {
       triggerRef.current = document.activeElement as HTMLElement;
@@ -388,7 +394,6 @@ export function WalletSelectorModal({
   useFocusTrap(modalRef, open);
   useEscapeKey(onClose, open);
 
-  // Colors
   const bg = dark ? "#1F2937" : "#FFFFFF";
   const border = dark ? "#374151" : "#E5E7EB";
   const textPrimary = dark ? "#F9FAFB" : "#111827";
@@ -401,7 +406,6 @@ export function WalletSelectorModal({
 
   if (!open) return null;
 
-  // On mobile: show mobile-compatible wallets first
   const sortedWallets = isMobile
     ? [
         ...WALLETS.filter((w) => w.mobileCompatible),
@@ -439,9 +443,10 @@ export function WalletSelectorModal({
           width: isMobile ? "100%" : "min(440px, 95vw)",
           maxHeight: "90vh",
           overflowY: "auto",
-          padding: "24px 20px 20px",
+          paddingBlock: "24px 20px",
+          paddingInline: 20,
           ...(isMobile
-            ? { bottom: 0, left: 0, right: 0 }
+            ? { bottom: 0, insetInlineStart: 0, insetInlineEnd: 0 }
             : {
                 top: "50%",
                 left: "50%",
@@ -464,7 +469,7 @@ export function WalletSelectorModal({
         )}
 
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBlockEnd: 20 }}>
           <h2
             id={titleId}
             style={{ margin: 0, fontSize: 18, fontWeight: 700, color: textPrimary }}
@@ -482,7 +487,8 @@ export function WalletSelectorModal({
               color: textMuted,
               fontSize: 22,
               lineHeight: 1,
-              padding: "2px 6px",
+              paddingBlock: 2,
+              paddingInline: 6,
               borderRadius: 4,
             }}
           >
@@ -499,13 +505,14 @@ export function WalletSelectorModal({
             alignItems: "center",
             gap: 12,
             width: "100%",
-            padding: "14px 16px",
+            paddingBlock: 14,
+            paddingInline: 16,
             background: passKeyBg,
             border: "none",
             borderRadius: 10,
             cursor: "pointer",
-            marginBottom: 16,
-            textAlign: "left",
+            marginBlockEnd: 16,
+            textAlign: "start",
           }}
         >
           <PasskeyIcon color="#ffffff" />
@@ -513,14 +520,14 @@ export function WalletSelectorModal({
             <div style={{ fontSize: 15, fontWeight: 700, color: "#ffffff" }}>
               Continue with Passkey
             </div>
-            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.75)", marginTop: 2 }}>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.75)", marginBlockStart: 2 }}>
               {passkeySubLabel(platform)} · No seed phrase needed
             </div>
           </div>
         </button>
 
         {/* Divider */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBlockEnd: 14 }}>
           <div style={{ flex: 1, height: 1, background: dividerColor }} />
           <span style={{ fontSize: 12, color: textMuted, whiteSpace: "nowrap" }}>
             or choose a wallet
@@ -534,7 +541,7 @@ export function WalletSelectorModal({
             display: "grid",
             gridTemplateColumns: isMobile ? "1fr" : "repeat(2, 1fr)",
             gap: 8,
-            marginBottom: 16,
+            marginBlockEnd: 16,
           }}
         >
           {sortedWallets.map((wallet) => {
@@ -562,8 +569,8 @@ export function WalletSelectorModal({
         {/* "New to Stellar?" expandable explainer */}
         <div
           style={{
-            borderTop: `1px solid ${dividerColor}`,
-            paddingTop: 12,
+            borderBlockStart: `1px solid ${dividerColor}`,
+            paddingBlockStart: 12,
           }}
         >
           <button
@@ -581,13 +588,14 @@ export function WalletSelectorModal({
               color: textMuted,
               fontSize: 13,
               fontWeight: 500,
-              padding: "4px 0",
+              paddingBlock: 4,
+              paddingInline: 0,
               width: "100%",
-              textAlign: "left",
+              textAlign: "start",
             }}
           >
             <span style={{ color: textMuted }}>
-              {explainerOpen ? <ChevronDown /> : <ChevronRight />}
+              {explainerOpen ? <ChevronDown /> : <ChevronInlineEnd />}
             </span>
             New to Stellar?
           </button>
@@ -596,8 +604,9 @@ export function WalletSelectorModal({
             id={explainerId}
             hidden={!explainerOpen}
             style={{
-              marginTop: 10,
-              padding: "14px 16px",
+              marginBlockStart: 10,
+              paddingBlock: 14,
+              paddingInline: 16,
               background: dark ? "#111827" : "#F9FAFB",
               borderRadius: 8,
               border: `1px solid ${border}`,
@@ -666,12 +675,13 @@ function WalletTile({
         display: "flex",
         alignItems: "center",
         gap: 10,
-        padding: "10px 12px",
+        paddingBlock: 10,
+        paddingInline: 12,
         background: hovered ? tileHoverBg : tileBg,
         border: `1px solid ${tileBorder}`,
         borderRadius: 8,
         cursor: "pointer",
-        textAlign: "left",
+        textAlign: "start",
         transition: "background 0.15s",
         position: "relative",
       }}
@@ -681,7 +691,7 @@ function WalletTile({
         <div style={{ fontSize: 14, fontWeight: 600, color: textPrimary }}>
           {wallet.name}
         </div>
-        <div style={{ fontSize: 11, color: textMuted, marginTop: 1 }}>
+        <div style={{ fontSize: 11, color: textMuted, marginBlockStart: 1 }}>
           {desktopOnly ? "Desktop only" : wallet.description}
         </div>
       </div>
@@ -694,7 +704,8 @@ function WalletTile({
             background: "#EFF6FF",
             border: "1px solid #BFDBFE",
             borderRadius: 4,
-            padding: "2px 5px",
+            paddingBlock: 2,
+            paddingInline: 5,
             flexShrink: 0,
           }}
         >
@@ -706,7 +717,7 @@ function WalletTile({
 }
 
 // ---------------------------------------------------------------------------
-// Stellar explainer (inside "New to Stellar?" panel)
+// Stellar explainer
 // ---------------------------------------------------------------------------
 
 interface ExplainerProps {
@@ -759,7 +770,6 @@ function StellarExplainer({ textPrimary, textMuted }: ExplainerProps) {
 // JIT Micro-Educator Cards
 // ---------------------------------------------------------------------------
 
-// Shared card shell
 interface JitCardShellProps {
   icon: React.ReactNode;
   title: string;
@@ -777,16 +787,18 @@ function JitCardShell({ icon, title, children, bg, borderColor }: JitCardShellPr
       style={{
         display: "flex",
         gap: 12,
-        padding: "14px 16px",
+        paddingBlock: 14,
+        paddingInline: 16,
         background: bg,
-        borderLeft: `4px solid ${borderColor}`,
+        /* Accent stripe on the inline-start edge — mirrors in RTL automatically */
+        borderInlineStart: `4px solid ${borderColor}`,
         borderRadius: "0 8px 8px 0",
-        marginBottom: 12,
+        marginBlockEnd: 12,
       }}
     >
-      <span style={{ paddingTop: 1, flexShrink: 0 }}>{icon}</span>
+      <span style={{ paddingBlockStart: 1, flexShrink: 0 }}>{icon}</span>
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{title}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBlockEnd: 6 }}>{title}</div>
         {children}
       </div>
     </div>
@@ -823,7 +835,8 @@ export function MissingTrustlineCard({
           type="button"
           onClick={onEnable}
           style={{
-            padding: "8px 16px",
+            paddingBlock: 8,
+            paddingInline: 16,
             background: ctaBg,
             color: "#fff",
             border: "none",
@@ -847,6 +860,7 @@ export function LowXlmReserveCard({
   shortfallXlm,
   onAddXlm,
   learnMoreUrl = "https://developers.stellar.org/docs/learn/fundamentals/lumens#minimum-balance",
+  locale = typeof navigator !== "undefined" ? navigator.language : "en-US",
 }: LowXlmReserveCardProps) {
   const dark = usePrefersDark();
   const bg = dark ? "#422006" : "#FEFCE8";
@@ -855,7 +869,9 @@ export function LowXlmReserveCard({
   const textColor = dark ? "#FEF9C3" : "#713F12";
   const ctaBg = dark ? "#F59E0B" : "#D97706";
 
-  const shortfallDisplay = shortfallXlm.toFixed(2);
+  // Locale-aware shortfall display, bidi-isolated so the number never
+  // reorders inside an RTL sentence.
+  const shortfallDisplay = formatXlmShortfall(shortfallXlm, locale);
 
   return (
     <JitCardShell
@@ -867,8 +883,14 @@ export function LowXlmReserveCard({
       <p style={{ margin: "0 0 6px", fontSize: 13, color: textColor, lineHeight: 1.5 }}>
         Stellar accounts keep a small amount of XLM (Stellar's native currency) locked as a
         security deposit — it's your money, just held to keep your account open. You need
-        approximately <strong>{shortfallDisplay} XLM</strong> more to cover this deposit before
-        proceeding.
+        approximately{" "}
+        {/* Bidi-isolate the numeric amount so it doesn't reorder in RTL text */}
+        <strong>
+          <span dir="ltr" style={{ unicodeBidi: "isolate" }}>
+            {shortfallDisplay}
+          </span>
+        </strong>{" "}
+        more to cover this deposit before proceeding.
       </p>
       <p style={{ margin: "0 0 12px", fontSize: 12, color: iconColor }}>
         This is not a fee — the deposit stays in your wallet and can be recovered if you ever
@@ -879,7 +901,8 @@ export function LowXlmReserveCard({
           type="button"
           onClick={onAddXlm}
           style={{
-            padding: "8px 16px",
+            paddingBlock: 8,
+            paddingInline: 16,
             background: ctaBg,
             color: "#fff",
             border: "none",
@@ -936,30 +959,33 @@ export function WrongNetworkCard({
         funds and won't be received here.
       </p>
 
-      {/* Network diagram */}
+      {/* Network diagram — arrow is directional, mirrored in RTL via scaleX */}
       <div
         aria-label={`Switch from ${walletNetworkLabel} to ${appNetwork}`}
         style={{
           display: "flex",
           alignItems: "center",
           gap: 8,
-          marginBottom: 12,
+          marginBlockEnd: 12,
           fontSize: 12,
           color: stepColor,
           fontFamily: "monospace",
         }}
       >
         <span style={{
-          padding: "3px 8px",
+          paddingBlock: 3,
+          paddingInline: 8,
           border: `1px solid ${borderColor}`,
           borderRadius: 4,
           background: dark ? "#7C2D12" : "#FEE2E2",
         }}>
           {walletNetworkLabel}
         </span>
-        <span style={{ fontSize: 16 }}>→</span>
+        {/* Directional arrow — mirrors in RTL */}
+        <span aria-hidden="true" style={{ fontSize: 16 }}>→</span>
         <span style={{
-          padding: "3px 8px",
+          paddingBlock: 3,
+          paddingInline: 8,
           border: `1px solid ${dark ? "#4ADE80" : "#16A34A"}`,
           borderRadius: 4,
           background: dark ? "#14532D" : "#DCFCE7",
@@ -970,12 +996,12 @@ export function WrongNetworkCard({
       </div>
 
       {/* Per-wallet instructions */}
-      <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: iconColor, marginBottom: 6 }}>
+      <div style={{ marginBlockEnd: 12 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: iconColor, marginBlockEnd: 6 }}>
           How to switch to {appNetwork}:
         </div>
         {Object.entries(NETWORK_INSTRUCTIONS).map(([wallet, steps]) => (
-          <div key={wallet} style={{ fontSize: 12, color: textColor, marginBottom: 3 }}>
+          <div key={wallet} style={{ fontSize: 12, color: textColor, marginBlockEnd: 3 }}>
             <strong>{wallet}:</strong>{" "}
             <span style={{ fontFamily: "monospace" }}>{steps}</span>
           </div>
@@ -987,7 +1013,8 @@ export function WrongNetworkCard({
           type="button"
           onClick={onReconnect}
           style={{
-            padding: "8px 16px",
+            paddingBlock: 8,
+            paddingInline: 16,
             background: ctaBg,
             color: "#fff",
             border: "none",

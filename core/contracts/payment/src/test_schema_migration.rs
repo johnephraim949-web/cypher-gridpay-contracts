@@ -224,7 +224,13 @@ fn test_migrate_schema_rejects_non_admin_before_running_migrations() {
 /// 100 payments whose customer/merchant indexes were never built (schema 1).
 fn legacy_payments(
     env: &Env,
-) -> (PaymentContractClient<'_>, Address, Address, Address, Address) {
+) -> (
+    PaymentContractClient<'_>,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
     let (client, contract_id, admin, customer, merchant, token) = setup(env);
     for i in 0..100 {
         create_payment(env, &client, &customer, &merchant, &token, 100 + i);
@@ -232,11 +238,23 @@ fn legacy_payments(
     env.as_contract(&contract_id, || {
         let instance = env.storage().instance();
         for index in 0..100_u64 {
-            instance.remove(&DataKey::Customer(CustomerDataKey::Payments(customer.clone(), index)));
-            instance.remove(&DataKey::Merchant(MerchantDataKey::Payments(merchant.clone(), index)));
+            instance.remove(&DataKey::Customer(CustomerDataKey::Payments(
+                customer.clone(),
+                index,
+            )));
+            instance.remove(&DataKey::Merchant(MerchantDataKey::Payments(
+                merchant.clone(),
+                index,
+            )));
         }
-        instance.set(&DataKey::Customer(CustomerDataKey::PaymentCount(customer.clone())), &0_u64);
-        instance.set(&DataKey::Merchant(MerchantDataKey::PaymentCount(merchant.clone())), &0_u64);
+        instance.set(
+            &DataKey::Customer(CustomerDataKey::PaymentCount(customer.clone())),
+            &0_u64,
+        );
+        instance.set(
+            &DataKey::Merchant(MerchantDataKey::PaymentCount(merchant.clone())),
+            &0_u64,
+        );
     });
     (client, admin, customer, merchant, token)
 }
@@ -264,7 +282,10 @@ fn test_migrate_schema_step_migrates_100_records_in_5_batches() {
                 &0_u64,
                 &String::from_str(&env, ""),
             );
-            assert_eq!(blocked, Err(Ok(Error::Basic(BasicError::MigrationInProgress))));
+            assert_eq!(
+                blocked,
+                Err(Ok(Error::Basic(BasicError::MigrationInProgress)))
+            );
             assert_eq!(client.get_payment(&1).id, 1);
         }
     }
@@ -317,7 +338,11 @@ fn test_migrate_schema_step_retrying_a_batch_is_idempotent() {
             .set(&DataKey::Config(ConfigKey::MigrationCursor), &cursor);
     });
     client.migrate_schema_step(&admin, &20);
-    assert_eq!(client.get_payment_count_by_customer(&customer), 20, "no duplicates");
+    assert_eq!(
+        client.get_payment_count_by_customer(&customer),
+        20,
+        "no duplicates"
+    );
 
     for _ in 0..4 {
         client.migrate_schema_step(&admin, &25);

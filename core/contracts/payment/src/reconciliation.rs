@@ -81,7 +81,9 @@ pub fn sync_escrowed_payment_state(env: &Env, payment_id: u64) -> Result<Payment
         Ok(Ok(a)) => a,
         _ => return Err(bridge_err()),
     };
-    if customer != payment.customer || merchant != payment.merchant || escrow_amount != payment.amount
+    if customer != payment.customer
+        || merchant != payment.merchant
+        || escrow_amount != payment.amount
     {
         return Err(Error::Feature(FeatureError::EscrowBridgeFailed));
     }
@@ -117,7 +119,9 @@ pub fn sync_escrowed_payment_state(env: &Env, payment_id: u64) -> Result<Payment
 
     payment.status = new_status.clone();
     env.storage().instance().set(&pkey, &payment);
-    env.storage().instance().set(&(RECONCILED_KEY, payment_id), &true);
+    env.storage()
+        .instance()
+        .set(&(RECONCILED_KEY, payment_id), &true);
     apply_analytics(env, &payment, &new_status);
 
     EscrowStateReconciled {

@@ -309,7 +309,13 @@ fn test_create_escrowed_payment_rolls_back_on_escrow_failure() {
 fn test_sync_noop_while_escrow_locked() {
     let (env, payment_client, escrow_client, customer, merchant, _admin, token) = setup_env();
     let (payment_id, _escrow_id) = create_escrowed_payment_ids(
-        &env, &payment_client, &escrow_client, &customer, &merchant, &token, 500_i128,
+        &env,
+        &payment_client,
+        &escrow_client,
+        &customer,
+        &merchant,
+        &token,
+        500_i128,
     );
     assert_eq!(
         payment_client.sync_escrowed_payment_state(&payment_id),
@@ -322,13 +328,22 @@ fn test_sync_noop_while_escrow_locked() {
 fn test_sync_out_of_band_release_completes_payment_once() {
     let (env, payment_client, escrow_client, customer, merchant, admin, token) = setup_env();
     let (payment_id, escrow_id) = create_escrowed_payment_ids(
-        &env, &payment_client, &escrow_client, &customer, &merchant, &token, 500_i128,
+        &env,
+        &payment_client,
+        &escrow_client,
+        &customer,
+        &merchant,
+        &token,
+        500_i128,
     );
 
     // Release directly on the escrow contract, bypassing the payment contract.
     env.ledger().with_mut(|l| l.timestamp = 10_000);
     escrow_client.release_escrow(&admin, &escrow_id, &false);
-    assert_eq!(payment_client.get_payment(&payment_id).status, PaymentStatus::Pending);
+    assert_eq!(
+        payment_client.get_payment(&payment_id).status,
+        PaymentStatus::Pending
+    );
 
     assert_eq!(
         payment_client.sync_escrowed_payment_state(&payment_id),
@@ -351,7 +366,13 @@ fn test_sync_out_of_band_release_completes_payment_once() {
 fn test_sync_out_of_band_refund_cancels_payment() {
     let (env, payment_client, escrow_client, customer, merchant, _admin, token) = setup_env();
     let (payment_id, escrow_id) = create_escrowed_payment_ids(
-        &env, &payment_client, &escrow_client, &customer, &merchant, &token, 500_i128,
+        &env,
+        &payment_client,
+        &escrow_client,
+        &customer,
+        &merchant,
+        &token,
+        500_i128,
     );
     escrow_client.refund_escrow(&customer, &escrow_id);
 
@@ -363,5 +384,7 @@ fn test_sync_out_of_band_refund_cancels_payment() {
 #[test]
 fn test_sync_unknown_payment_errors() {
     let (_env, payment_client, _e, _c, _m, _a, _t) = setup_env();
-    assert!(payment_client.try_sync_escrowed_payment_state(&9_999).is_err());
+    assert!(payment_client
+        .try_sync_escrowed_payment_state(&9_999)
+        .is_err());
 }

@@ -1,0 +1,103 @@
+name: Setup Rust (cached)
+description: >
+  Installs the Rust toolchain, restores Cargo registry / target caches for the
+  core, orchestrator and tests/e2e workspaces, and installs a pinned,
+  checksum-verified Stellar CLI (cached by OS, arch and version).
+
+inputs:
+  toolchain:
+    description: Rust toolchain to install
+    default: stable
+  components:
+    description: Comma-separated rustup components
+    default: ""
+  targets:
+    description: Comma-separated rustup targets
+    default: wasm32-unknown-unknown
+  install-stellar-cli:
+    description: Install the pinned Stellar CLI ("true" or "false")
+    default: "true"
+  stellar-cli-version:
+    description: Exact stellar-cli version (no leading v). Update checksums below when bumping.
+    default: "30.0.1"
+  cache-key-suffix:
+    description: Extra suffix for the rust-cache key (use to separate job flavours)
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - name: Cache Cargo registry and target dirs
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      with:
+        workspaces: |
+          core
+          orchestrator
+          tests/e2e
+        cache-on-failure: true
+        key: ${{ inputs.cache-key-suffix }}
+
+    - name: Resolve Stellar CLI asset
+      if: inputs.install-stellar-cli == 'true'
+      id: stellar-asset
+      shell: bash
+      env:
+        VERSION: ${{ inputs.stellar-cli-version }}
+      run: |
+        set -euo pipefail
+        # SHA-256 digests of the release tarballs, taken from the GitHub release
+        # asset metadata of stellar/stellar-cli v30.0.1. Re-resolve when bumping.
+        if [ "$VERSION" != "30.0.1" ]; then
+          echo "::error::No checksums recorded for stellar-cli $VERSION; update .github/actions/setup-rust-cached/action.yml"
+          exit 1
+        fi
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)  triple=x86_64-unknown-linux-gnu;  sha=48c70074020e09af0a3ebbd2bf62d53c9aec47935e49a112d3cd90fb4e37658f ;;
+          macOS-ARM64) triple=aarch64-apple-darwin;     sha=53e126c7be4ec096809a44cececdc7dee5131f261f3c8b85bdafb98053556d55 ;;
+          macOS-X64)  triple=x86_64-apple-darwin;       sha=46a11bfaa1dce67f75f024594aaea04ee69c50407ea5663891e52fa107568acf ;;
+          *) echo "::error::Unsupported runner ${RUNNER_OS}-${RUNNER_ARCH} for stellar-cli"; exit 1 ;;
+        esac
+        echo "triple=$triple" >> "$GITHUB_OUTPUT"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+    - name: Cache Stellar CLI binary
+      if: inputs.install-stellar-cli == 'true'
+      id: stellar-cache
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      with:
+        path: ~/.stellar-cli-bin
+        key: stellar-cli-${{ runner.os }}-${{ runner.arch }}-${{ inputs.stellar-cli-version }}
+
+    - name: Download and verify Stellar CLI
+      if: inputs.install-stellar-cli == 'true' && steps.stellar-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.stellar-cli-version }}
+        TRIPLE: ${{ steps.stellar-asset.outputs.triple }}
+        SHA: ${{ steps.stellar-asset.outputs.sha }}
+      run: |
+        set -euo pipefail
+        tmp="$(mktemp -d)"
+        file="stellar-cli-${VERSION}-${TRIPLE}.tar.gz"
+        curl -fsSL -o "$tmp/$file" \
+          "https://github.com/stellar/stellar-cli/releases/download/v${VERSION}/${file}"
+        if command -v sha256sum >/dev/null 2>&1; then
+          echo "${SHA}  $tmp/$file" | sha256sum -c -
+        else
+          echo "${SHA}  $tmp/$file" | shasum -a 256 -c -
+        fi
+        mkdir -p "$HOME/.stellar-cli-bin"
+        tar -xzf "$tmp/$file" -C "$HOME/.stellar-cli-bin" stellar
+
+    - name: Add Stellar CLI to PATH
+      if: inputs.install-stellar-cli == 'true'
+      shell: bash
+      run: |
+        echo "$HOME/.stellar-cli-bin" >> "$GITHUB_PATH"

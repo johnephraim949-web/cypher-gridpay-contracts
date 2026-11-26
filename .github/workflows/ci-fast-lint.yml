@@ -1,0 +1,46 @@
+name: CI Fast Lint
+
+# Issue #364. Fast fail-early Linux lint (fmt + clippy) using the cached
+# composite action. It is ADDITIVE and lives outside ci.yml on purpose
+# (ci.yml is being edited by other PRs). Duplicate fmt/clippy runs with
+# ci.yml's matrix-test job are expected until maintainers migrate; see
+# docs/CI_CACHING.md.
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ['v*']
+  pull_request:
+    branches: [main, develop]
+
+# Cancel superseded PR runs; never cancel runs on main/develop or tags.
+concurrency:
+  group: ci-fast-lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (fmt + clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust (cached)
+        uses: ./.github/actions/setup-rust-cached
+        with:
+          components: clippy, rustfmt
+          install-stellar-cli: "false"
+          cache-key-suffix: lint
+
+      - name: Format check
+        run: |
+          make fmt
+          git diff --exit-code
+
+      - name: Clippy
+        run: make clippy

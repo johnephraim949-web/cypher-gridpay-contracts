@@ -157,7 +157,9 @@ mod tiered_ttl {
         let admin = Address::generate(env);
         client.initialize(&admin);
         let customer = Address::generate(env);
-        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        let token = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
         token::StellarAssetClient::new(env, &token).mint(&customer, &1_000_000);
         (client, contract_id, admin, customer, token)
     }
@@ -189,9 +191,18 @@ mod tiered_ttl {
             );
         }
         // Critical entries get the longest bump and highest threshold.
-        assert!(StorageTier::CriticalActiveLock.bump_amount() > StorageTier::StandardActive.bump_amount());
-        assert!(StorageTier::StandardActive.bump_amount() > StorageTier::TerminalAuditRecord.bump_amount());
-        assert!(StorageTier::TerminalAuditRecord.bump_amount() > StorageTier::EphemeralWindow.bump_amount());
+        assert!(
+            StorageTier::CriticalActiveLock.bump_amount()
+                > StorageTier::StandardActive.bump_amount()
+        );
+        assert!(
+            StorageTier::StandardActive.bump_amount()
+                > StorageTier::TerminalAuditRecord.bump_amount()
+        );
+        assert!(
+            StorageTier::TerminalAuditRecord.bump_amount()
+                > StorageTier::EphemeralWindow.bump_amount()
+        );
     }
 
     #[test]
@@ -211,12 +222,17 @@ mod tiered_ttl {
         let (client, contract_id, _, customer, token) = setup(&env);
         let merchant = Address::generate(&env);
         let release = env.ledger().timestamp() + 400 * DAY_SECS; // past the 120-day bump
-        let id = client.create_escrow(&customer, &merchant, &500_i128, &token, &release, &0, &0, &false);
+        let id = client.create_escrow(
+            &customer, &merchant, &500_i128, &token, &release, &0, &0, &false,
+        );
         let escrow = env.as_contract(&contract_id, || EscrowContract::get_escrow(&env, id));
 
         let grace = escrow.escalation_timeout.max(259_200);
         let ttl = instance_ttl(&env, &contract_id);
-        assert!(ttl >= ledgers_at_5s(&env, release, grace), "TTL {ttl} ends before the deadline");
+        assert!(
+            ttl >= ledgers_at_5s(&env, release, grace),
+            "TTL {ttl} ends before the deadline"
+        );
         assert!(ttl > StorageTier::CriticalActiveLock.bump_amount());
 
         // Walk to just past the deadline + grace: the escrow is still there.
@@ -232,7 +248,16 @@ mod tiered_ttl {
         let env = Env::default();
         let (client, contract_id, _, customer, token) = setup(&env);
         let release = env.ledger().timestamp() + 20 * 365 * DAY_SECS;
-        client.create_escrow(&customer, &Address::generate(&env), &500_i128, &token, &release, &0, &0, &false);
+        client.create_escrow(
+            &customer,
+            &Address::generate(&env),
+            &500_i128,
+            &token,
+            &release,
+            &0,
+            &0,
+            &false,
+        );
         assert_eq!(instance_ttl(&env, &contract_id), env.storage().max_ttl());
     }
 
@@ -242,13 +267,17 @@ mod tiered_ttl {
         let (client, contract_id, admin, customer, token) = setup(&env);
         let merchant = Address::generate(&env);
         let release = env.ledger().timestamp() + 300 * DAY_SECS;
-        let locked = client.create_escrow(&customer, &merchant, &500_i128, &token, &release, &0, &0, &false);
-        let released = client.create_escrow(&customer, &merchant, &500_i128, &token, &0, &0, &0, &false);
+        let locked = client.create_escrow(
+            &customer, &merchant, &500_i128, &token, &release, &0, &0, &false,
+        );
+        let released =
+            client.create_escrow(&customer, &merchant, &500_i128, &token, &0, &0, &0, &false);
         client.release_escrow(&admin, &released, &false);
 
         // Time passes and the TTL runs down.
         advance_ledgers(&env, 60 * DAY_IN_LEDGERS);
-        env.ledger().set_timestamp(env.ledger().timestamp() + 60 * DAY_SECS / 2);
+        env.ledger()
+            .set_timestamp(env.ledger().timestamp() + 60 * DAY_SECS / 2);
         let before = instance_ttl(&env, &contract_id);
 
         let bumped = client.batch_bump_critical(&vec![&env, locked, released, 999]);

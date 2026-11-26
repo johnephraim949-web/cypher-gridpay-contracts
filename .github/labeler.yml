@@ -1,0 +1,110 @@
+# .github/labeler.yml
+# Automatic PR domain labeling based on changed file paths.
+# Used by actions/labeler in .github/workflows/pr-hygiene.yml
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'frontend/**'
+          - 'web/**'
+          - 'apps/web/**'
+          - 'packages/ui/**'
+          - '**/*.tsx'
+          - '**/*.jsx'
+          - '**/*.css'
+          - '**/*.scss'
+
+devops:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/**'
+          - 'infra/**'
+          - 'terraform/**'
+          - 'deploy/**'
+          - 'scripts/**'
+          - 'docker/**'
+          - 'Dockerfile'
+          - 'Dockerfile.*'
+          - 'docker-compose*.yml'
+          - 'docker-compose*.yaml'
+          - '**/*.tf'
+          - '**/*.tfvars'
+          - '**/*.hcl'
+          - 'Makefile'
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/**'
+          - 'documentation/**'
+          - '**/*.md'
+          - '**/*.mdx'
+          - 'LICENSE'
+          - 'CHANGELOG*'
+
+'ui/ux':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'design/**'
+          - 'design-system/**'
+          - '**/*.fig'
+          - '**/*.sketch'
+          - '**/assets/**'
+          - '**/icons/**'
+          - '**/styles/**'
+          - '**/theme/**'
+
+smart-contract:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'core/contracts/**'
+          - 'contracts/**'
+          - '**/*.sol'
+          - '**/hardhat.config.*'
+          - '**/foundry.toml'
+          - '**/truffle-config.*'
+
+backend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'backend/**'
+          - 'server/**'
+          - 'api/**'
+          - 'services/**'
+          - '**/*.go'
+          - '**/*.rs'
+          - '**/*.java'
+          - '**/*.kt'
+          - '**/*.py'
+
+payment:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'core/contracts/payment/**'
+          - 'core/contracts/payments/**'
+          - '**/payment/**'
+          - '**/payments/**'
+          - '**/*payment*'
+
+escrow:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'core/contracts/escrow/**'
+          - '**/escrow/**'
+          - '**/*escrow*'
+
+refund:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'core/contracts/refund/**'
+          - 'core/contracts/refunds/**'
+          - '**/refund/**'
+          - '**/refunds/**'
+          - '**/*refund*'
+
+orchestrator:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'orchestrator/**'
+          - '**/orchestrator/**'
+          - '**/*orchestrator*'

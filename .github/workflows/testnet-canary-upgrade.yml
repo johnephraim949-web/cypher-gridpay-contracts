@@ -1,0 +1,550 @@
+name: Testnet Canary Upgrade Pipeline
+
+on:
+  push:
+    branches:
+      - 'release/*'
+  workflow_dispatch:
+    inputs:
+      release_candidate:
+        description: 'Release candidate ref (branch/tag) to canary on Testnet'
+        required: true
+        type: string
+      wasm_artifact_name:
+        description: 'Name of the WASM artifact to deploy (uploaded by build job)'
+        required: false
+        default: 'soroban-wasm'
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: testnet-canary-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # Testnet-only configuration. Mainnet is explicitly forbidden below.
+  STELLAR_NETWORK: testnet
+  STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015'
+  SOROBAN_RPC_URL: 'https://soroban-testnet.stellar.org'
+  HORIZON_URL: 'https://horizon-testnet.stellar.org'
+  CANARY_DEPLOYMENT: 'testnet-canary'
+  MIGRATION_CHUNK_SIZE: '50'
+  MIGRATION_MAX_ITERATIONS: '200'
+  REPORT_PATH: 'upgrade-readiness-report'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Guard: refuse to run if anything points at Mainnet.
+  # ---------------------------------------------------------------------------
+  mainnet-guard:
+    name: Mainnet RPC / Passphrase Guard
+    runs-on: ubuntu-latest
+    outputs:
+      guarded: ${{ steps.guard.outputs.guarded }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Reject Mainnet configuration
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          MAINNET_PASSPHRASE="Public Global Stellar Network ; September 2015"
+          MAINNET_RPC_PATTERNS=(
+            "soroban-mainnet.stellar.org"
+            "horizon.stellar.org"
+            "mainnet.stellar.org"
+            "stellar-mainnet"
+          )
+
+          fail() {
+            echo "::error title=Mainnet Guard::$1"
+            echo "guarded=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          }
+
+          # 1. Passphrase must be the Testnet passphrase.
+          if [[ "${STELLAR_NETWORK_PASSPHRASE}" == "${MAINNET_PASSPHRASE}" ]]; then
+            fail "Mainnet passphrase supplied; canary workflows must never target Mainnet."
+          fi
+          if [[ "${STELLAR_NETWORK_PASSPHRASE}" != "Test SDF Network ; September 2015" ]]; then
+            fail "Unexpected network passphrase '${STELLAR_NETWORK_PASSPHRASE}'; only Testnet is allowed."
+          fi
+
+          # 2. RPC / Horizon URLs must not match Mainnet patterns.
+          for url in "${SOROBAN_RPC_URL}" "${HORIZON_URL}"; do
+            for pattern in "${MAINNET_RPC_PATTERNS[@]}"; do
+              if [[ "${url}" == *"${pattern}"* ]]; then
+                fail "Mainnet endpoint detected in '${url}' (matched '${pattern}')."
+              fi
+            done
+          done
+
+          # 3. Scan repo config for accidental Mainnet overrides.
+          if grep -rIl --exclude-dir=.git --exclude-dir=node_modules \
+              -e "Public Global Stellar Network" \
+              -e "soroban-mainnet.stellar.org" \
+              .github/ scripts/ 2>/dev/null; then
+            fail "Mainnet references found in workflow/scripts configuration."
+          fi
+
+          echo "Mainnet guard passed: Testnet-only configuration confirmed."
+          echo "guarded=true" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Dry-run schema migration on all four contracts.
+  # ---------------------------------------------------------------------------
+  dry-run-migration:
+    name: Dry-Run Schema Migration
+    needs: mainnet-guard
+    if: needs.mainnet-guard.outputs.guarded == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Install Rust / Stellar CLI
+        uses: ./.github/actions/setup-soroban
+        continue-on-error: true
+
+      - name: Fallback toolchain setup
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v stellar >/dev/null 2>&1; then
+            curl -fsSL https://github.com/stellar/stellar-cli/releases/latest/download/install.sh | bash || true
+          fi
+          stellar --version || echo "stellar CLI unavailable; relying on project scripts"
+
+      - name: Run dry_run_migrate_schema on all contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPORT_PATH}"
+          CONTRACTS=(Payment Escrow Refund Admin)
+          OVERALL_STATUS=0
+          echo "{" > "${REPORT_PATH}/dry-run-migration.json"
+          echo '  "contracts": {' >> "${REPORT_PATH}/dry-run-migration.json"
+          first=1
+          for contract in "${CONTRACTS[@]}"; do
+            echo "::group::dry_run_migrate_schema ${contract}"
+            log_file="${REPORT_PATH}/dry-run-${contract}.log"
+            if ./scripts/dry-run-migrate-schema.sh "${contract}" 2>&1 | tee "${log_file}"; then
+              invariant_errors=$(grep -c -i "invariant error" "${log_file}" || true)
+              if [[ "${invariant_errors}" -gt 0 ]]; then
+                echo "::error title=Invariant Failure::${contract} reported ${invariant_errors} invariant error(s)."
+                status="failed"
+                OVERALL_STATUS=1
+              else
+                status="ok"
+              fi
+            else
+              echo "::error title=Dry-Run Failure::dry_run_migrate_schema failed for ${contract}."
+              status="failed"
+              OVERALL_STATUS=1
+            fi
+            [[ $first -eq 0 ]] && echo "," >> "${REPORT_PATH}/dry-run-migration.json"
+            first=0
+            printf '    "%s": {"status": "%s"}' "${contract}" "${status}" >> "${REPORT_PATH}/dry-run-migration.json"
+            echo "::endgroup::"
+          done
+          echo "" >> "${REPORT_PATH}/dry-run-migration.json"
+          echo "  }" >> "${REPORT_PATH}/dry-run-migration.json"
+          echo "}" >> "${REPORT_PATH}/dry-run-migration.json"
+          exit "${OVERALL_STATUS}"
+
+      - name: Upload dry-run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-dry-run-migration
+          path: ${{ env.REPORT_PATH }}/dry-run-*
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Upload WASM and execute multisig upgrade approval flow.
+  # ---------------------------------------------------------------------------
+  wasm-upgrade:
+    name: WASM Upload & Multisig Upgrade
+    needs: dry-run-migration
+    runs-on: ubuntu-latest
+    outputs:
+      upgrade_started_at: ${{ steps.upgrade.outputs.upgrade_started_at }}
+      upgrade_finished_at: ${{ steps.upgrade.outputs.upgrade_finished_at }}
+      upgrade_gas: ${{ steps.upgrade.outputs.upgrade_gas }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.wasm_artifact_name || 'soroban-wasm' }}
+          path: wasm
+        continue-on-error: true
+
+      - name: Build WASM if artifact unavailable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$(ls -A wasm 2>/dev/null)" ]]; then
+            echo "No WASM artifact found; building from source."
+            ./scripts/build-wasm.sh
+            mkdir -p wasm
+            find target -name '*.wasm' -exec cp {} wasm/ \;
+          fi
+          ls -la wasm
+
+      - name: Upload WASM to Testnet & execute multisig upgrade
+        id: upgrade
+        shell: bash
+        env:
+          CANARY_SIGNER_SECRET_1: ${{ secrets.CANARY_SIGNER_SECRET_1 }}
+          CANARY_SIGNER_SECRET_2: ${{ secrets.CANARY_SIGNER_SECRET_2 }}
+          CANARY_SIGNER_SECRET_3: ${{ secrets.CANARY_SIGNER_SECRET_3 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPORT_PATH}"
+          upgrade_started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "upgrade_started_at=${upgrade_started_at}" >> "$GITHUB_OUTPUT"
+
+          # Upload WASM and propose/approve/execute the upgrade via multisig.
+          ./scripts/canary-upgrade.sh \
+            --network "${STELLAR_NETWORK}" \
+            --rpc-url "${SOROBAN_RPC_URL}" \
+            --network-passphrase "${STELLAR_NETWORK_PASSPHRASE}" \
+            --wasm-dir wasm \
+            --deployment "${CANARY_DEPLOYMENT}" \
+            --report-dir "${REPORT_PATH}" \
+            2>&1 | tee "${REPORT_PATH}/wasm-upgrade.log"
+
+          upgrade_finished_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          upgrade_gas=$(grep -oE 'gas[ _-]?(spent|used)[:= ]+[0-9]+' "${REPORT_PATH}/wasm-upgrade.log" | tail -n1 | grep -oE '[0-9]+' || echo "0")
+          echo "upgrade_finished_at=${upgrade_finished_at}" >> "$GITHUB_OUTPUT"
+          echo "upgrade_gas=${upgrade_gas}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload upgrade logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-wasm-upgrade
+          path: ${{ env.REPORT_PATH }}/wasm-upgrade.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Chunked migrate_schema_step until get_migration_cursor completes.
+  # ---------------------------------------------------------------------------
+  stepped-migration:
+    name: Chunked Schema Migration
+    needs: wasm-upgrade
+    runs-on: ubuntu-latest
+    outputs:
+      migration_duration_seconds: ${{ steps.migrate.outputs.migration_duration_seconds }}
+      migration_gas: ${{ steps.migrate.outputs.migration_gas }}
+      schema_versions: ${{ steps.migrate.outputs.schema_versions }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Run chunked migrate_schema_step
+        id: migrate
+        shell: bash
+        env:
+          CANARY_SIGNER_SECRET_1: ${{ secrets.CANARY_SIGNER_SECRET_1 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPORT_PATH}"
+          migrate_start=$(date +%s)
+
+          iteration=0
+          total_gas=0
+          while :; do
+            iteration=$((iteration + 1))
+            if [[ "${iteration}" -gt "${MIGRATION_MAX_ITERATIONS}" ]]; then
+              echo "::error title=Migration Timeout::Exceeded ${MIGRATION_MAX_ITERATIONS} iterations."
+              exit 1
+            fi
+
+            echo "::group::migrate_schema_step iteration ${iteration}"
+            step_log="${REPORT_PATH}/migrate-step-${iteration}.log"
+            ./scripts/canary-migrate-step.sh \
+              --network "${STELLAR_NETWORK}" \
+              --rpc-url "${SOROBAN_RPC_URL}" \
+              --network-passphrase "${STELLAR_NETWORK_PASSPHRASE}" \
+              --deployment "${CANARY_DEPLOYMENT}" \
+              --chunk-size "${MIGRATION_CHUNK_SIZE}" \
+              2>&1 | tee "${step_log}"
+
+            step_gas=$(grep -oE 'gas[ _-]?(spent|used)[:= ]+[0-9]+' "${step_log}" | tail -n1 | grep -oE '[0-9]+' || echo "0")
+            total_gas=$((total_gas + step_gas))
+
+            cursor=$(./scripts/canary-get-migration-cursor.sh \
+              --network "${STELLAR_NETWORK}" \
+              --rpc-url "${SOROBAN_RPC_URL}" \
+              --network-passphrase "${STELLAR_NETWORK_PASSPHRASE}" \
+              --deployment "${CANARY_DEPLOYMENT}" 2>/dev/null || echo "unknown")
+            echo "Migration cursor: ${cursor}"
+            echo "::endgroup::"
+
+            if [[ "${cursor}" == "complete" || "${cursor}" == "done" || "${cursor}" == "0" ]]; then
+              echo "Migration complete after ${iteration} iteration(s)."
+              break
+            fi
+          done
+
+          migrate_end=$(date +%s)
+          duration=$((migrate_end - migrate_start))
+
+          schema_versions=$(./scripts/canary-get-schema-versions.sh \
+            --network "${STELLAR_NETWORK}" \
+            --rpc-url "${SOROBAN_RPC_URL}" \
+            --network-passphrase "${STELLAR_NETWORK_PASSPHRASE}" \
+            --deployment "${CANARY_DEPLOYMENT}" 2>/dev/null || echo "unknown")
+
+          echo "migration_duration_seconds=${duration}" >> "$GITHUB_OUTPUT"
+          echo "migration_gas=${total_gas}" >> "$GITHUB_OUTPUT"
+          echo "schema_versions=${schema_versions}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "{"
+            echo "  \"iterations\": ${iteration},"
+            echo "  \"duration_seconds\": ${duration},"
+            echo "  \"gas\": ${total_gas},"
+            echo "  \"schema_versions\": \"${schema_versions}\""
+            echo "}"
+          } > "${REPORT_PATH}/stepped-migration.json"
+
+      - name: Upload migration logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-stepped-migration
+          path: |
+            ${{ env.REPORT_PATH }}/migrate-step-*.log
+            ${{ env.REPORT_PATH }}/stepped-migration.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Synthetic end-to-end smoke probes.
+  # ---------------------------------------------------------------------------
+  smoke-probes:
+    name: Synthetic Smoke Probes
+    needs: stepped-migration
+    runs-on: ubuntu-latest
+    outputs:
+      probes_passed: ${{ steps.probes.outputs.probes_passed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Execute canary smoke probes
+        id: probes
+        shell: bash
+        env:
+          CANARY_SIGNER_SECRET_1: ${{ secrets.CANARY_SIGNER_SECRET_1 }}
+          CANARY_SIGNER_SECRET_2: ${{ secrets.CANARY_SIGNER_SECRET_2 }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPORT_PATH}"
+          if ./scripts/canary-smoke-probes.sh \
+              --network "${STELLAR_NETWORK}" \
+              --rpc-url "${SOROBAN_RPC_URL}" \
+              --network-passphrase "${STELLAR_NETWORK_PASSPHRASE}" \
+              --deployment "${CANARY_DEPLOYMENT}" \
+              --report-dir "${REPORT_PATH}" \
+              2>&1 | tee "${REPORT_PATH}/smoke-probes.log"; then
+            echo "probes_passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error title=Smoke Probe Failure::One or more synthetic probes failed on Testnet canary."
+            echo "probes_passed=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+      - name: Upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-smoke-probes
+          path: ${{ env.REPORT_PATH }}/smoke-probes.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Emergency pause on probe failure.
+  # ---------------------------------------------------------------------------
+  emergency-pause:
+    name: Emergency Pause (Probe Failure)
+    needs: smoke-probes
+    if: failure() && needs.smoke-probes.outputs.probes_passed == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Trigger emergency_pause_all on canary
+        shell: bash
+        env:
+          CANARY_SIGNER_SECRET_1: ${{ secrets.CANARY_SIGNER_SECRET_1 }}
+        run: |
+          set -euo pipefail
+          echo "::warning title=Emergency Pause::Smoke probes failed; invoking emergency_pause_all on Testnet canary."
+          ./scripts/canary-emergency-pause.sh \
+            --network "${STELLAR_NETWORK}" \
+            --rpc-url "${SOROBAN_RPC_URL}" \
+            --network-passphrase "${STELLAR_NETWORK_PASSPHRASE}" \
+            --deployment "${CANARY_DEPLOYMENT}" \
+            2>&1 | tee emergency-pause.log || true
+
+      - name: Mark release candidate blocked
+        shell: bash
+        run: |
+          echo "::error title=Release Candidate Blocked::Canary smoke probes failed; release candidate is BLOCKED for Mainnet promotion."
+          echo "### :no_entry: Release Candidate BLOCKED" >> "$GITHUB_STEP_SUMMARY"
+          echo "Synthetic smoke probes failed on the Testnet canary. \`emergency_pause_all\` was invoked." >> "$GITHUB_STEP_SUMMARY"
+          echo "Do **not** create a Mainnet multisig proposal for this release candidate." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload emergency pause log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-emergency-pause
+          path: emergency-pause.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Upgrade Readiness Report for Mainnet signers.
+  # ---------------------------------------------------------------------------
+  readiness-report:
+    name: Upgrade Readiness Report
+    needs:
+      - dry-run-migration
+      - wasm-upgrade
+      - stepped-migration
+      - smoke-probes
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_candidate || github.ref }}
+
+      - name: Download all canary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+        continue-on-error: true
+
+      - name: Assemble Upgrade Readiness Report
+        shell: bash
+        env:
+          DRY_RUN_STATUS: ${{ needs.dry-run-migration.result }}
+          UPGRADE_STATUS: ${{ needs.wasm-upgrade.result }}
+          MIGRATION_STATUS: ${{ needs.stepped-migration.result }}
+          PROBES_STATUS: ${{ needs.smoke-probes.result }}
+          PROBES_PASSED: ${{ needs.smoke-probes.outputs.probes_passed }}
+          MIGRATION_DURATION: ${{ needs.stepped-migration.outputs.migration_duration_seconds }}
+          MIGRATION_GAS: ${{ needs.stepped-migration.outputs.migration_gas }}
+          SCHEMA_VERSIONS: ${{ needs.stepped-migration.outputs.schema_versions }}
+          UPGRADE_GAS: ${{ needs.wasm-upgrade.outputs.upgrade_gas }}
+          UPGRADE_STARTED: ${{ needs.wasm-upgrade.outputs.upgrade_started_at }}
+          UPGRADE_FINISHED: ${{ needs.wasm-upgrade.outputs.upgrade_finished_at }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${REPORT_PATH}"
+
+          if [[ "${PROBES_STATUS}" == "success" && "${PROBES_PASSED}" == "true" \
+                && "${DRY_RUN_STATUS}" == "success" \
+                && "${UPGRADE_STATUS}" == "success" \
+                && "${MIGRATION_STATUS}" == "success" ]]; then
+            READINESS="READY"
+          else
+            READINESS="BLOCKED"
+          fi
+
+          cat > "${REPORT_PATH}/upgrade-readiness-report.md" <<EOF
+          # Testnet Canary Upgrade Readiness Report
+
+          - **Release candidate:** \`${{ github.event.inputs.release_candidate || github.ref }}\`
+          - **Commit:** \`${{ github.sha }}\`
+          - **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - **Network:** Testnet canary (\`${CANARY_DEPLOYMENT}\`)
+          - **Overall readiness:** **${READINESS}**
+
+          ## Stage Results
+
+          | Stage | Result |
+          |-------|--------|
+          | Dry-run schema migration (Payment, Escrow, Refund, Admin) | ${DRY_RUN_STATUS} |
+          | WASM upload & multisig upgrade | ${UPGRADE_STATUS} |
+          | Chunked schema migration | ${MIGRATION_STATUS} |
+          | Synthetic smoke probes | ${PROBES_STATUS} |
+
+          ## Migration Metrics
+
+          - **Migration duration:** ${MIGRATION_DURATION:-n/a} seconds
+          - **Migration gas spent:** ${MIGRATION_GAS:-n/a}
+          - **Upgrade gas spent:** ${UPGRADE_GAS:-n/a}
+          - **Upgrade started:** ${UPGRADE_STARTED:-n/a}
+          - **Upgrade finished:** ${UPGRADE_FINISHED:-n/a}
+          - **Schema versions:** ${SCHEMA_VERSIONS:-n/a}
+
+          ## Synthetic Probe Outcomes
+
+          - create & complete payment
+          - create & release escrow
+          - request & process refund
+          - query \`get_system_status\`
+
+          Probe result: **${PROBES_PASSED:-unknown}**
+
+          > If any probe failed, \`emergency_pause_all\` was invoked on the canary and this
+          > release candidate is BLOCKED for Mainnet promotion.
+          EOF
+
+          {
+            echo "{"
+            echo "  \"release_candidate\": \"${{ github.event.inputs.release_candidate || github.ref }}\","
+            echo "  \"commit\": \"${{ github.sha }}\","
+            echo "  \"network\": \"testnet-canary\","
+            echo "  \"readiness\": \"${READINESS}\","
+            echo "  \"stages\": {"
+            echo "    \"dry_run_migration\": \"${DRY_RUN_STATUS}\","
+            echo "    \"wasm_upgrade\": \"${UPGRADE_STATUS}\","
+            echo "    \"stepped_migration\": \"${MIGRATION_STATUS}\","
+            echo "    \"smoke_probes\": \"${PROBES_STATUS}\""
+            echo "  },"
+            echo "  \"migration_duration_seconds\": \"${MIGRATION_DURATION:-}\","
+            echo "  \"migration_gas\": \"${MIGRATION_GAS:-}\","
+            echo "  \"upgrade_gas\": \"${UPGRADE_GAS:-}\","
+            echo "  \"schema_versions\": \"${SCHEMA_VERSIONS:-}\","
+            echo "  \"probes_passed\": \"${PROBES_PASSED:-}\""
+            echo "}"
+          } > "${REPORT_PATH}/upgrade-readiness-report.json"
+
+          cat "${REPORT_PATH}/upgrade-readiness-report.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Upgrade Readiness Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-readiness-report
+          path: ${{ env.REPORT_PATH }}/upgrade-readiness-report.*
+          if-no-files-found: error
+          retention-days: 90
