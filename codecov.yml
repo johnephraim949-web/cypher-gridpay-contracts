@@ -1,0 +1,105 @@
+# Codecov configuration for Cypher GridPay
+# https://docs.codecov.com/docs/codecov-yaml
+
+codecov:
+  require_ci_to_pass: true
+  notify:
+    wait_for_ci: true
+
+coverage:
+  precision: 2
+  round: down
+  range: "60...100"
+
+  status:
+    # Project-wide coverage status (informational, non-blocking by default)
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+        flags:
+          - payment
+          - escrow
+          - refund
+          - orchestrator
+          - ts-sdk
+          - py-sdk
+
+    # Enforce a minimum patch coverage floor on newly added/modified lines
+    patch:
+      default:
+        target: 80%
+        threshold: 0%
+        informational: false
+        flags:
+          - payment
+          - escrow
+          - refund
+          - orchestrator
+          - ts-sdk
+          - py-sdk
+
+# Per-component flags with path mappings
+flags:
+  payment:
+    paths:
+      - core/payment/
+    carryforward: true
+
+  escrow:
+    paths:
+      - core/escrow/
+    carryforward: true
+
+  refund:
+    paths:
+      - core/refund/
+    carryforward: true
+
+  orchestrator:
+    paths:
+      - orchestrator/
+    carryforward: true
+
+  ts-sdk:
+    paths:
+      - sdk/typescript/
+    carryforward: true
+
+  py-sdk:
+    paths:
+      - sdk/python/
+    carryforward: true
+
+# Exclude test-only files from the coverage denominator so metrics
+# accurately reflect production contract logic.
+ignore:
+  - "**/*_test.rs"
+  - "**/test_*.rs"
+  - "core/test_utils/"
+  - "**/tests/"
+  - "**/test/"
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "**/__tests__/"
+  - "**/test_*.py"
+  - "**/*_test.py"
+  - "**/conftest.py"
+  - "**/node_modules/"
+  - "**/target/"
+  - "**/dist/"
+  - "**/build/"
+
+# Comment configuration for pull requests
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  require_base: false
+  require_head: true
+  show_carryforward_flags: true
+
+# GitHub checks configuration
+github_checks:
+  annotations: true

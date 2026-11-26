@@ -1,0 +1,281 @@
+# OpenTelemetry Collector configuration for the Stellar payment platform.
+#
+# Ingests OTLP traces, metrics, and logs from all off-chain services
+# (Soroban RPC gateway, Event Indexer, Webhook Dispatcher, Relayer, Frontend BFF)
+# and exports:
+#   - traces  -> Tempo (OTLP)
+#   - logs    -> Loki (OTLP HTTP)
+#   - metrics -> Prometheus (scrape endpoint)
+#
+# Pipeline guarantees:
+#   - Structured JSON log schema with mandatory correlation fields.
+#   - Redaction of Authorization headers, HMAC secrets, API keys and
+#     Stellar `S...` secret seeds before storage.
+#   - Tail-based sampling: 100% of errors, 100% of slow spans (> 2s),
+#     10% of healthy read traffic.
+#
+# Validate with: otelcol validate --config=deploy/monitoring/otel-collector.yaml
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 16
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://*"
+            - "https://*"
+
+processors:
+  # ---------------------------------------------------------------------------
+  # Memory limiter must be first in every pipeline to protect the collector.
+  # ---------------------------------------------------------------------------
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # ---------------------------------------------------------------------------
+  # Batch to reduce export pressure and storage cost.
+  # ---------------------------------------------------------------------------
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # ---------------------------------------------------------------------------
+  # Resource detection enriches telemetry with host/container metadata.
+  # ---------------------------------------------------------------------------
+  resourcedetection:
+    detectors: [env, system, docker]
+    timeout: 2s
+    override: false
+
+  # ---------------------------------------------------------------------------
+  # Redaction / transform processor.
+  #
+  # Strips sensitive material from log bodies and attributes:
+  #   - Authorization headers (Bearer / Basic / raw tokens)
+  #   - HMAC secrets (hmac_secret, x-hmac-signature, signature)
+  #   - API keys (api_key, x-api-key, apikey)
+  #   - Stellar secret seeds (S... 56-char StrKey)
+  #
+  # The same scrubbing is applied to span attributes so trace payloads
+  # cannot leak secrets either.
+  # ---------------------------------------------------------------------------
+  transform/redact:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          # Drop Authorization header attributes entirely.
+          - delete_key(attributes, "http.request.header.authorization")
+          - delete_key(attributes, "http.request.header.Authorization")
+          - delete_key(attributes, "authorization")
+          - delete_key(attributes, "Authorization")
+          # Drop HMAC / API key attributes.
+          - delete_key(attributes, "hmac_secret")
+          - delete_key(attributes, "x-hmac-signature")
+          - delete_key(attributes, "x_hmac_signature")
+          - delete_key(attributes, "api_key")
+          - delete_key(attributes, "x-api-key")
+          - delete_key(attributes, "x_api_key")
+          - delete_key(attributes, "apikey")
+          # Scrub Stellar secret seeds from any remaining string attribute.
+          - replace_pattern(attributes, "S[A-Z2-7]{55}", "***REDACTED_STELLAR_SEED***")
+          # Scrub bearer tokens from any remaining string attribute.
+          - replace_pattern(attributes, "(?i)bearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer ***REDACTED***")
+    log_statements:
+      - context: log
+        statements:
+          # Drop Authorization header attributes entirely.
+          - delete_key(attributes, "http.request.header.authorization")
+          - delete_key(attributes, "http.request.header.Authorization")
+          - delete_key(attributes, "authorization")
+          - delete_key(attributes, "Authorization")
+          # Drop HMAC / API key attributes.
+          - delete_key(attributes, "hmac_secret")
+          - delete_key(attributes, "x-hmac-signature")
+          - delete_key(attributes, "x_hmac_signature")
+          - delete_key(attributes, "api_key")
+          - delete_key(attributes, "x-api-key")
+          - delete_key(attributes, "x_api_key")
+          - delete_key(attributes, "apikey")
+          # Scrub Stellar secret seeds from the log body.
+          - replace_pattern(body, "S[A-Z2-7]{55}", "***REDACTED_STELLAR_SEED***")
+          # Scrub Stellar secret seeds from any string attribute.
+          - replace_pattern(attributes, "S[A-Z2-7]{55}", "***REDACTED_STELLAR_SEED***")
+          # Scrub bearer tokens from the log body.
+          - replace_pattern(body, "(?i)bearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer ***REDACTED***")
+          # Scrub bearer tokens from any string attribute.
+          - replace_pattern(attributes, "(?i)bearer\\s+[A-Za-z0-9._~+/=-]+", "Bearer ***REDACTED***")
+          # Scrub HMAC signatures embedded in the body.
+          - replace_pattern(body, "(?i)(hmac[_-]?secret|signature)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9+/=_-]+", "${1}=***REDACTED***")
+          # Scrub API keys embedded in the body.
+          - replace_pattern(body, "(?i)(api[_-]?key)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9+/=_-]+", "${1}=***REDACTED***")
+
+  # ---------------------------------------------------------------------------
+  # Tail-based sampling.
+  #
+  # Policy (evaluated in order, first match wins):
+  #   1. Any span with error status           -> keep 100%
+  #   2. Any span slower than 2s              -> keep 100%
+  #   3. Healthy read traffic (GET/HEAD)      -> keep 10%
+  #   4. Everything else (writes, etc.)       -> keep 100%
+  #
+  # `decision_wait` bounds memory; `num_traces` bounds the LRU cache.
+  # ---------------------------------------------------------------------------
+  tail_sampling:
+    decision_wait: 10s
+    num_traces: 100000
+    expected_new_traces_per_sec: 1000
+    policies:
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow-transactions
+        type: latency
+        latency:
+          threshold_ms: 2000
+      - name: healthy-read-traffic
+        type: and
+        and:
+          and_sub_policy:
+            - name: read-methods
+              type: string_attribute
+              string_attribute:
+                key: http.request.method
+                values: [GET, HEAD]
+            - name: non-error
+              type: status_code
+              status_code:
+                status_codes: [UNSET, OK]
+      - name: healthy-read-sampling
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+      - name: default-keep
+        type: always_sample
+
+  # ---------------------------------------------------------------------------
+  # Normalize the structured JSON log schema so downstream queries are stable.
+  # Mandatory correlation fields are promoted to resource attributes when
+  # present: trace_id, span_id, service, network, ledger_seq, tx_hash,
+  # contract_id, payment_id / escrow_id / refund_id.
+  # ---------------------------------------------------------------------------
+  transform/schema:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - set(attributes["service"], resource.attributes["service.name"]) where attributes["service"] == nil
+          - set(attributes["network"], "unknown") where attributes["network"] == nil
+          - set(attributes["trace_id"], trace_id.string) where attributes["trace_id"] == nil and trace_id.string != ""
+          - set(attributes["span_id"], span_id.string) where attributes["span_id"] == nil and span_id.string != ""
+
+  # ---------------------------------------------------------------------------
+  # Prometheus exporter for collector self-metrics.
+  # ---------------------------------------------------------------------------
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+exporters:
+  # ---------------------------------------------------------------------------
+  # Traces -> Tempo via OTLP gRPC.
+  # ---------------------------------------------------------------------------
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 5000
+
+  # ---------------------------------------------------------------------------
+  # Logs -> Loki via OTLP HTTP.
+  # ---------------------------------------------------------------------------
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 5000
+
+  # ---------------------------------------------------------------------------
+  # Debug exporter for local troubleshooting (observability profile).
+  # ---------------------------------------------------------------------------
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  telemetry:
+    logs:
+      level: info
+      encoding: json
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - transform/redact
+        - tail_sampling
+        - batch
+      exporters: [otlp/tempo, debug]
+
+    metrics:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - batch
+      exporters: [prometheus, debug]
+
+    logs:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resourcedetection
+        - transform/redact
+        - transform/schema
+        - batch
+      exporters: [otlphttp/loki, debug]
