@@ -1,0 +1,49 @@
+# Gitleaks configuration for Cypher GridPay.
+# Extends the default ruleset and adds Stellar/GridPay-specific rules.
+title = "cypher-gridpay gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "stellar-secret-seed"
+description = "Stellar Ed25519 secret seed (StrKey, S + 55 base32 chars)"
+regex = '''\bS[A-Z2-7]{55}\b'''
+keywords = ["S"]
+tags = ["stellar", "secret"]
+
+[[rules]]
+id = "soroban-rpc-bearer-token"
+description = "Soroban RPC bearer token or API key assignment"
+regex = '''(?i)(soroban[_-]?rpc|rpc)[_-]?(token|api[_-]?key|bearer)["']?\s*[:=]\s*["']?[A-Za-z0-9._\-]{20,}'''
+keywords = ["rpc"]
+tags = ["soroban", "token"]
+
+[[rules]]
+id = "database-connection-uri"
+description = "PostgreSQL or Redis connection URI with embedded password"
+regex = '''(?i)\b(postgres(?:ql)?|rediss?)://[^\s:@/'"]+:[^\s@/'"]{3,}@[^\s'"]+'''
+keywords = ["postgres://", "postgresql://", "redis://", "rediss://"]
+tags = ["database", "credentials"]
+
+[[rules]]
+id = "webhook-hmac-secret"
+description = "Webhook HMAC signing secret assignment"
+regex = '''(?i)webhook[_-]?(hmac[_-]?)?(secret|signing[_-]?key)["']?\s*[:=]\s*["']?[A-Za-z0-9+/=_\-]{16,}'''
+keywords = ["webhook"]
+tags = ["webhook", "secret"]
+
+# Allowlist is scoped to test fixtures and unfunded dummy constants only.
+[allowlist]
+description = "Test fixtures and non-funded standalone dummy constants"
+paths = [
+  '''^tests/''',
+  '''(^|/)test_utils/''',
+  '''(^|/)(test|tests)/[^/]+\.(mjs|ts|js|rs)$''',
+  '''\.gitleaks\.toml$''',
+]
+regexes = [
+  # Obvious placeholders such as S + 55 'A' characters
+  '''S(A{55}|B{55})''',
+  '''(?i)(changeme|example|dummy|placeholder|password@localhost)''',
+]

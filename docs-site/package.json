@@ -1,0 +1,22 @@
+{
+  "name": "cypher-gridpay-docs-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Unified documentation portal for Cypher GridPay (guides + Rust/TypeScript/Python API references).",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "npm run build:api && astro build",
+    "build:api": "node scripts/build-api-docs.mjs",
+    "preview": "astro preview",
+    "check:links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.28.0",
+    "astro": "^4.16.0",
+    "sharp": "^0.33.5"
+  },
+  "devDependencies": {
+    "typedoc": "^0.26.0"
+  }
+}

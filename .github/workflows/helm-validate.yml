@@ -1,0 +1,23 @@
+name: Helm Validate
+on:
+  pull_request:
+    paths: ["deploy/helm/**", ".github/workflows/helm-validate.yml"]
+permissions:
+  contents: read
+jobs:
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install helm and kubeconform
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+      - name: Lint and validate overlays
+        run: |
+          for v in values-staging.yaml values-production.yaml; do
+            helm lint deploy/helm/gridpay -f deploy/helm/gridpay/$v
+            helm template gridpay deploy/helm/gridpay -f deploy/helm/gridpay/$v \
+              | kubeconform -strict -ignore-missing-schemas -summary
+          done

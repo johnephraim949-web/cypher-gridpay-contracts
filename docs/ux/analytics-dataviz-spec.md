@@ -9,18 +9,21 @@
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Color-Blind Safe Palette](#color-blind-safe-palette)
-3. [Series-to-Style Mapping](#series-to-style-mapping)
-4. [Chart Component Standards](#chart-component-standards)
+2. [AnalyticsPage Composition](#analyticspage-composition)
+3. [URL Query-Param State Contract](#url-query-param-state-contract)
+4. [Insufficient Sample Size Rule](#insufficient-sample-size-rule)
+5. [Color-Blind Safe Palette](#color-blind-safe-palette)
+6. [Series-to-Style Mapping](#series-to-style-mapping)
+7. [Chart Component Standards](#chart-component-standards)
    - [Tooltip Specification](#tooltip-specification)
    - [Threshold Reference Lines](#threshold-reference-lines)
    - [Chart / Table View Switcher](#chart--table-view-switcher)
-5. [ReasonCodeChart Specification](#reasoncodechart-specification)
-6. [QuotaGauge Specification](#quotagauge-specification)
-7. [Edge Cases & Resilience](#edge-cases--resilience)
-8. [Responsive Layout](#responsive-layout)
-9. [Accessibility](#accessibility)
-10. [Verification Checklist](#verification-checklist)
+8. [ReasonCodeChart Specification](#reasoncodechart-specification)
+9. [QuotaGauge Specification](#quotagauge-specification)
+10. [Edge Cases & Resilience](#edge-cases--resilience)
+11. [Responsive Layout](#responsive-layout)
+12. [Accessibility](#accessibility)
+13. [Verification Checklist](#verification-checklist)
 
 ---
 
@@ -28,10 +31,103 @@
 
 This spec defines standardized chart primitives for merchant-facing analytics covering:
 
-- **Refund reason-code velocity** (`get_reason_code_velocity_delta`) — time-series line chart with up to 6 simultaneous series.
-- **Quota / Chargeback Ratio gauges** — radial or bar gauges with Warning and Circuit Breaker Trip bands.
+- **Payment volume & net revenue time-series** — stacked/grouped series with a currency toggle (`USDC`, `XLM`, multi-token).
+- **Refund reason-code distribution** — bar/donut breakdown of refund reason codes for the selected range.
+- **Refund reason-code velocity** (`get_reason_code_velocity_delta`) — time-series line chart with up to 6 simultaneous series, plus an epoch-over-epoch velocity delta table.
+- **Quota / Chargeback Ratio gauges** — radial or bar gauges with Warning and Circuit Breaker Trip bands showing proximity to `MerchantRefundQuota` and circuit-breaker trip thresholds.
+- **Settlement latency percentiles** — p50 / p95 / p99 latency chart.
 
 All charts share a single color system, tooltip pattern, threshold-line pattern, and Chart/Table toggle so the UI is internally consistent and comprehensible under deuteranopia, protanopia, and tritanopia conditions.
+
+---
+
+## AnalyticsPage Composition
+
+**File:** `apps/web/src/pages/merchant/AnalyticsPage.tsx`
+
+The page is a responsive, accessible grid of analytics cards. Each card is self-contained: it owns its data fetch, its Chart/Table toggle, and its table fallback. Cards render in this order:
+
+| # | Card | Data Source | Component |
+|---|---|---|---|
+| 1 | Payment Volume & Net Revenue | `PaymentAnalytics` (volume, net revenue) | `VolumeRevenueChart` |
+| 2 | Refund Reason-Code Distribution | `get_merchant_reason_analytics` | `ReasonCodeChart` (donut/bar mode) |
+| 3 | Reason-Code Velocity Delta Table | `get_reason_code_velocity_delta` | `VelocityDeltaTable` |
+| 4 | Refund Quota / Chargeback Ratio | `get_merchant_refund_summary`, `MerchantRefundQuota` | `QuotaGauge` |
+| 5 | Settlement Latency Percentiles | `PaymentAnalytics` quantiles (p50/p95/p99) | `LatencyPercentileChart` |
+
+### Card 1 — Payment Volume & Net Revenue
+
+- Time-series chart with two series: **Volume** (gross) and **Net Revenue** (after fees/refunds).
+- **Currency toggle** segmented control: `USDC`, `XLM`, and `Multi-token` (all tokens stacked). The active token selection is reflected in the URL (see [URL Query-Param State Contract](#url-query-param-state-contract)).
+- Multi-token mode stacks per-token series and shows a per-token legend; single-token mode shows a single volume line and a single net-revenue line.
+- Y-axis is currency-formatted with the active token's symbol; in multi-token mode values are normalized to a common display unit and the axis label states the normalization.
+
+### Card 2 — Refund Reason-Code Distribution
+
+- Bar or donut chart of refund counts per reason code for the selected range, using the [Series-to-Style Mapping](#series-to-style-mapping) colors and hatch patterns.
+- Donut mode shows percentage labels; bar mode shows absolute counts. A toggle switches between them.
+- Values come from `get_merchant_reason_analytics`; platform-wide comparison (from `get_platform_reason_analytics`) is shown as a secondary muted series when available.
+
+### Card 3 — Reason-Code Velocity Delta Table
+
+- Tabular, epoch-over-epoch view of `get_reason_code_velocity_delta`: one row per reason code, columns for current epoch count, previous epoch count, absolute delta, and percentage delta.
+- Percentage deltas are formatted with sign (`▲ +18.4%`, `▼ −3.1%`, `— 0.0%`) and use `tabular-nums`.
+- Rows for epochs with fewer than 5 transactions are annotated per the [Insufficient Sample Size Rule](#insufficient-sample-size-rule) and their percentage deltas are visually de-emphasized (muted text + annotation) rather than hidden.
+- Zero-division (previous epoch count = 0) renders the percentage delta as `—` (n/a) with a tooltip "No prior-epoch volume"; it never renders `Infinity` or `NaN`.
+
+### Card 4 — Refund Quota / Chargeback Ratio
+
+- One or more `QuotaGauge` instances: refund quota utilization (vs `MerchantRefundQuota`) and chargeback ratio (vs circuit-breaker trip threshold).
+- See [QuotaGauge Specification](#quotagauge-specification).
+
+### Card 5 — Settlement Latency Percentiles
+
+- Line or grouped-bar chart of settlement latency percentiles **p50 / p95 / p99** over the selected range, sourced from `PaymentAnalytics` quantiles.
+- Y-axis is duration (ms or s, auto-scaled with unit label). Each percentile is a distinct series using the palette + dash patterns.
+- Missing percentile values for an epoch render as a gap (not zero).
+
+### Shared Page Behavior
+
+- All chart data transformations are **memoized** (`useMemo` keyed on range + currency + raw data identity).
+- For large multi-epoch datasets, transformations run in a **web worker** or behind a **debounced selector** so the main thread stays responsive.
+- Every card renders an explicit **"Insufficient Sample Size"** annotation when applicable (see below).
+- Every card provides a keyboard-accessible, `aria-label`ed **table fallback** (see [Chart / Table View Switcher](#chart--table-view-switcher)).
+
+---
+
+## URL Query-Param State Contract
+
+Active filters and date range are persisted in the URL so views are shareable and survive reloads. The page reads these params on mount and writes them on change via `history.replaceState` (no full navigation).
+
+| Param | Values | Default | Meaning |
+|---|---|---|---|
+| `range` | `7d` \| `30d` \| `90d` \| `epoch` | `30d` | Date-range selector. `epoch` enables the epoch-range mode. |
+| `from` | ISO 8601 date (`YYYY-MM-DD`) | — | Start of an explicit epoch range; only meaningful when `range=epoch`. |
+| `to` | ISO 8601 date (`YYYY-MM-DD`) | — | End of an explicit epoch range; only meaningful when `range=epoch`. |
+| `currency` | `usdc` \| `xlm` \| `multi` | `usdc` | Currency toggle for the volume/revenue chart. |
+| `epochFrom` | integer epoch index | — | Optional epoch-index bound for `range=epoch`. |
+| `epochTo` | integer epoch index | — | Optional epoch-index bound for `range=epoch`. |
+
+**Rules:**
+
+- Unknown or invalid param values fall back to the documented default and are normalized in the URL on next write (do not throw).
+- `range=epoch` without valid `from`/`to` (or `epochFrom`/`epochTo`) falls back to `30d` and shows an inline notice.
+- The date-range selector exposes `7D`, `30D`, `90D`, and `Epoch Range` options; selecting `Epoch Range` reveals `from`/`to` (or epoch-index) inputs.
+- Changing any filter updates the URL without adding history entries; the page state is fully reconstructable from the URL alone (deep-link safe).
+- Params are namespaced to the analytics page; other pages ignore them.
+
+---
+
+## Insufficient Sample Size Rule
+
+Percentage velocity deltas are statistically misleading for tiny epochs. Therefore:
+
+- An epoch with **fewer than 5 transactions** (total across all reason codes, or per the metric being displayed) is flagged as **insufficient sample size**.
+- Affected charts/tables display an explicit annotation: **"Insufficient Sample Size"** (with a short tooltip: "Fewer than 5 transactions in this epoch; percentage deltas may be unreliable.").
+- In the velocity delta table, the annotation appears on the affected row and the percentage delta is rendered muted/de-emphasized. The absolute delta is still shown.
+- In time-series charts, affected epochs are marked with a subtle annotation marker (e.g., a hollow point or a footnote marker) and the annotation is repeated in the table fallback.
+- The threshold (5) is a single shared constant (`MIN_SAMPLE_SIZE = 5`) so it can be tuned in one place.
+- The rule never hides data — it only annotates and de-emphasizes.
 
 ---
 
@@ -300,6 +396,7 @@ interface QuotaGaugeProps {
 - **Overflow:** If `value > circuitBreakerThreshold`, the bar fills to 100% and a "⚠ Circuit Breaker Tripped" badge appears below the bar in `--cb-vermillion`.
 - **Table view:** Shows a two-row table: current value (formatted as `XX.X%`) and delta vs previous epoch.
 - **Tooltip (hover/focus):** Shows exact numeric value, threshold distances: "12.7% below Warning", "37.7% below Circuit Breaker Trip".
+- **Proximity to thresholds:** The gauge visually communicates proximity to `MerchantRefundQuota` and the circuit-breaker trip threshold; when within 10% of the Warning threshold, the value label gains a subtle emphasis (bold) but color is not the sole signal.
 
 ---
 
@@ -316,6 +413,10 @@ interface QuotaGaugeProps {
 | Narrow mobile screen (< 400 px) | Tooltip pins to top of card; legend wraps to 2-column grid; x-axis labels skip alternate ticks |
 | `get_reason_code_velocity_delta` returns error | Show inline error state: "Could not load velocity data. Retry ↺" with retry button |
 | NaN / null values in API response | Treat as missing (`null`); render as gap in line, exclude from delta calculation |
+| Epoch with < 5 transactions | Annotate "Insufficient Sample Size"; de-emphasize percentage delta (see [Insufficient Sample Size Rule](#insufficient-sample-size-rule)) |
+| Previous-epoch count = 0 (zero division) | Percentage delta renders `—` (n/a) with "No prior-epoch volume" tooltip; never `Infinity`/`NaN` |
+| Invalid URL query params | Fall back to documented defaults, normalize URL on next write, do not throw |
+| `range=epoch` with missing bounds | Fall back to `30d` and show inline notice |
 
 ---
 
@@ -339,6 +440,8 @@ Charts use `width: 100%` and respond to container resize via `ResizeObserver`. M
 - All threshold lines include a visible text label — not just a colored line.
 - Minimum contrast ratio of 4.5:1 against chart background for all labels and axis text (WCAG 2.1 AA).
 - Chart / Table toggle fulfills the "text alternative" requirement: users who cannot interpret the chart can switch to the table view at any time.
+- **Every chart on `AnalyticsPage`** (volume/revenue, reason-code distribution, velocity delta table, quota gauge, latency percentiles) provides an `aria-label`ed table fallback reachable via the Chart/Table toggle; the table has a visible `<caption>` and `scope="col"` headers.
+- "Insufficient Sample Size" annotations are exposed to assistive tech (not color-only): the annotation text is present in the DOM and included in the table fallback.
 
 ---
 
@@ -359,3 +462,10 @@ Charts use `width: 100%` and respond to container resize via `ResizeObserver`. M
 - [ ] Responsive layout verified at 320 px, 480 px, 768 px, 1280 px, 1920 px viewport widths.
 - [ ] All SVG elements have `role="img"` and descriptive `aria-label`.
 - [ ] Minimum 4.5:1 contrast ratio for all text elements.
+- [ ] `AnalyticsPage` renders volume/revenue, reason-code distribution, velocity delta table, quota gauge, and latency percentile cards from live/indexed data.
+- [ ] URL query params (`range`, `from`, `to`, `currency`, `epochFrom`, `epochTo`) persist filters and date range across reloads and are deep-link safe.
+- [ ] Currency toggle (`USDC`, `XLM`, multi-token) updates the volume/revenue chart and URL.
+- [ ] Epochs with < 5 transactions show the "Insufficient Sample Size" annotation and de-emphasized percentage deltas.
+- [ ] Zero-division percentage deltas render `—` (n/a), never `Infinity`/`NaN`.
+- [ ] Every chart on `AnalyticsPage` has a keyboard-accessible, `aria-label`ed table fallback.
+- [ ] Chart data transformations are memoized; large multi-epoch datasets use a web worker or debounced selector.

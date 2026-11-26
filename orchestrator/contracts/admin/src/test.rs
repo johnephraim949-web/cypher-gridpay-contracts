@@ -639,3 +639,159 @@ fn test_sync_parameters_requires_admin_and_broadcasts() {
     assert_eq!(synced, 3);
     assert_eq!(c.get_protocol_parameters().max_fee_bps, 110);
 }
+
+fn quorum(s: &Setup) -> Vec<Address> {
+    Vec::from_array(&s.env, [s.admin.clone(), s.pauser.clone()])
+}
+
+#[test]
+fn test_pause_target_is_selective_without_cascade() {
+    let s = setup();
+    let c = s.client();
+
+    c.emergency_pause_target(&s.pauser, &ContractTarget::Refund, &false, &s.reason());
+
+    assert_eq!(all_paused(&s), [false, false, true]);
+
+    let status = c.get_system_status();
+    assert!(status.refund_pause_state.paused);
+    assert_eq!(status.refund_pause_state.reason, s.reason());
+    assert_eq!(status.refund_pause_state.cascaded_from, None);
+    assert!(!status.payment_pause_state.paused);
+    assert!(!status.escrow_pause_state.paused);
+    assert_eq!(status.target_pause_states.len(), 3);
+}
+
+#[test]
+fn test_pause_target_cascades_dependents_in_dag_order() {
+    let s = setup();
+    let c = s.client();
+
+    c.emergency_pause_target(&s.pauser, &ContractTarget::Payment, &true, &s.reason());
+
+    assert_eq!(all_paused(&s), [true, true, true]);
+    let status = c.get_system_status();
+    assert_eq!(status.payment_pause_state.cascaded_from, None);
+    assert_eq!(
+        status.escrow_pause_state.cascaded_from,
+        Some(Symbol::new(&s.env, "payment"))
+    );
+    assert_eq!(
+        status.refund_pause_state.cascaded_from,
+        Some(Symbol::new(&s.env, "payment"))
+    );
+    assert_eq!(
+        status.target_pause_states.get(0).unwrap().target,
+        ContractTarget::Payment
+    );
+    assert_eq!(
+        status.target_pause_states.get(2).unwrap().target,
+        ContractTarget::Refund
+    );
+}
+
+#[test]
+fn test_escrow_cascade_only_pauses_refund() {
+    let s = setup();
+    let c = s.client();
+
+    c.emergency_pause_target(&s.pauser, &ContractTarget::Escrow, &true, &s.reason());
+
+    assert_eq!(all_paused(&s), [false, true, true]);
+    let status = c.get_system_status();
+    assert_eq!(
+        status.refund_pause_state.cascaded_from,
+        Some(Symbol::new(&s.env, "escrow"))
+    );
+}
+
+#[test]
+fn test_pause_target_requires_configured_pauser() {
+    let s = setup();
+    let c = s.client();
+    let attacker = Address::generate(&s.env);
+
+    assert_eq!(
+        c.try_emergency_pause_target(&attacker, &ContractTarget::Payment, &true, &s.reason()),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(all_paused(&s), [false, false, false]);
+}
+
+#[test]
+fn test_unpause_target_rejects_out_of_order_unpause() {
+    let s = setup();
+    let c = s.client();
+    c.emergency_pause_target(&s.pauser, &ContractTarget::Payment, &true, &s.reason());
+
+    assert_eq!(
+        c.try_emergency_unpause_target(&quorum(&s), &ContractTarget::Refund),
+        Err(Ok(Error::DependencyStillPaused))
+    );
+    assert_eq!(
+        c.try_emergency_unpause_target(&quorum(&s), &ContractTarget::Escrow),
+        Err(Ok(Error::DependencyStillPaused))
+    );
+    assert_eq!(all_paused(&s), [true, true, true]);
+
+    c.emergency_unpause_target(&quorum(&s), &ContractTarget::Payment);
+    assert_eq!(all_paused(&s), [false, true, true]);
+    c.emergency_unpause_target(&quorum(&s), &ContractTarget::Escrow);
+    assert_eq!(all_paused(&s), [false, false, true]);
+    c.emergency_unpause_target(&quorum(&s), &ContractTarget::Refund);
+    assert_eq!(all_paused(&s), [false, false, false]);
+
+    let status = c.get_system_status();
+    assert!(!status.refund_pause_state.paused);
+    assert_eq!(
+        status.refund_pause_state.reason,
+        String::from_str(&s.env, "")
+    );
+}
+
+#[test]
+fn test_unpause_target_enforces_signature_quorum() {
+    let s = setup();
+    let c = s.client();
+    c.emergency_pause_target(&s.pauser, &ContractTarget::Refund, &false, &s.reason());
+
+    assert_eq!(
+        c.try_emergency_unpause_target(&Vec::new(&s.env), &ContractTarget::Refund),
+        Err(Ok(Error::InsufficientApprovals))
+    );
+
+    let attacker = Address::generate(&s.env);
+    assert_eq!(
+        c.try_emergency_unpause_target(
+            &Vec::from_array(&s.env, [attacker]),
+            &ContractTarget::Refund
+        ),
+        Err(Ok(Error::Unauthorized))
+    );
+
+    let duplicate = Vec::from_array(&s.env, [s.pauser.clone(), s.pauser.clone()]);
+    assert_eq!(
+        c.try_emergency_unpause_target(&duplicate, &ContractTarget::Refund),
+        Err(Ok(Error::DuplicateApproval))
+    );
+    assert!(refund_paused(&s.env, &s.refund));
+
+    c.emergency_unpause_target(&quorum(&s), &ContractTarget::Refund);
+    assert!(!refund_paused(&s.env, &s.refund));
+}
+
+#[test]
+fn test_unpause_all_clears_cascade_metadata() {
+    let s = setup();
+    let c = s.client();
+    c.emergency_pause_target(&s.pauser, &ContractTarget::Payment, &true, &s.reason());
+
+    c.emergency_unpause_all(&s.pauser);
+
+    let status = c.get_system_status();
+    assert!(status
+        .target_pause_states
+        .iter()
+        .all(|state| !state.paused && state.cascaded_from.is_none()));
+    assert_eq!(all_paused(&s), [false, false, false]);
+}

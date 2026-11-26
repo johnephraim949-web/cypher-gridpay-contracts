@@ -1,4 +1,9 @@
 #![no_std]
+
+#[cfg(test)]
+#[path = "test.rs"]
+mod external_tests;
+
 use escrow::EscrowContractClient;
 use payments::PaymentContractClient;
 use refund::RefundContractClient;
@@ -31,6 +36,8 @@ pub enum Error {
     ParameterOutOfBounds = 17,
     ParameterStepTooLarge = 18,
     ParameterCooldownActive = 19,
+    DependencyStillPaused = 20,
+    DuplicateApproval = 21,
 }
 
 /// Identifies which downstream contract address is being rotated.
@@ -40,6 +47,17 @@ pub enum ContractTarget {
     Payment,
     Escrow,
     Refund,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct TargetPauseState {
+    pub target: ContractTarget,
+    pub paused: bool,
+    pub reason: String,
+    pub paused_at: u64,
+    pub paused_by: Address,
+    pub cascaded_from: Option<Symbol>,
 }
 
 /// A contract address rotation that has been proposed but has not yet taken
@@ -83,6 +101,10 @@ pub struct SystemStatus {
     pub refund_paused: bool,
     /// Storage schema version reported by the refund contract.
     pub refund_schema_version: u32,
+    pub payment_pause_state: TargetPauseState,
+    pub escrow_pause_state: TargetPauseState,
+    pub refund_pause_state: TargetPauseState,
+    pub target_pause_states: Vec<TargetPauseState>,
 }
 
 #[contractevent]
@@ -116,6 +138,7 @@ pub enum DataKey {
     // Issue #240: global protocol parameter registry
     ProtocolParameters,
     ParameterLastUpdated(ProtocolParameter),
+    TargetPauseState(ContractTarget),
 }
 
 /// How long an upgrade proposal stays executable once its timelock has
@@ -530,6 +553,14 @@ impl AdminContract {
         EscrowContractClient::new(&env, &escrow_contract).pause_contract(&pauser, &reason);
         RefundContractClient::new(&env, &refund_contract).pause_contract(&pauser, &reason);
 
+        for target in [
+            ContractTarget::Payment,
+            ContractTarget::Escrow,
+            ContractTarget::Refund,
+        ] {
+            Self::write_target_pause_state(&env, &target, &pauser, &reason, None);
+        }
+
         // Emit audit event
         env.events().publish(
             (Symbol::new(&env, "emergency_pause_all"), pauser.clone()),
@@ -560,10 +591,70 @@ impl AdminContract {
         EscrowContractClient::new(&env, &escrow_contract).unpause_contract(&pauser);
         RefundContractClient::new(&env, &refund_contract).unpause_contract(&pauser);
 
+        for target in [
+            ContractTarget::Payment,
+            ContractTarget::Escrow,
+            ContractTarget::Refund,
+        ] {
+            Self::clear_target_pause_state(&env, &target, &pauser);
+        }
+
         // Emit audit event
         env.events().publish(
             (Symbol::new(&env, "emergency_unpause_all"), pauser.clone()),
             (),
+        );
+
+        Ok(())
+    }
+
+    pub fn emergency_pause_target(
+        env: Env,
+        pauser: Address,
+        target: ContractTarget,
+        cascade_dependents: bool,
+        reason: String,
+    ) -> Result<(), Error> {
+        pauser.require_auth();
+        Self::require_pauser(&env, &pauser)?;
+        Self::get_contract_addresses(&env)?;
+
+        let targets = Self::targets_to_pause(&env, &target, cascade_dependents);
+        for (index, current) in targets.iter().enumerate() {
+            let cascaded_from = if index == 0 {
+                None
+            } else {
+                Some(Self::target_symbol(&env, &target))
+            };
+            Self::pause_target(&env, &current, &pauser, &reason, cascaded_from)?;
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_pause_target"), target, pauser),
+            (cascade_dependents, reason),
+        );
+
+        Ok(())
+    }
+
+    pub fn emergency_unpause_target(
+        env: Env,
+        admins: Vec<Address>,
+        target: ContractTarget,
+    ) -> Result<(), Error> {
+        Self::require_unpause_quorum(&env, &admins)?;
+        Self::require_upstreams_unpaused(&env, &target)?;
+
+        let pauser: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pauser)
+            .ok_or(Error::NotInitialized)?;
+        Self::unpause_target(&env, &target, &pauser)?;
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_unpause_target"), target),
+            admins,
         );
 
         Ok(())
@@ -826,13 +917,59 @@ impl AdminContract {
         let escrow = EscrowContractClient::new(&env, &escrow_contract);
         let refund = RefundContractClient::new(&env, &refund_contract);
 
+        let payment_child = payment.get_pause_state();
+        let escrow_child = escrow.get_pause_state();
+        let refund_child = refund.get_pause_state();
+
+        let payment_state = Self::read_target_pause_state(
+            &env,
+            &ContractTarget::Payment,
+            payment_child.globally_paused,
+            &payment_child.pause_reason,
+            payment_child.paused_at,
+            &payment_child.paused_by,
+        );
+        let escrow_state = Self::read_target_pause_state(
+            &env,
+            &ContractTarget::Escrow,
+            escrow_child.globally_paused,
+            &escrow_child.pause_reason,
+            escrow_child.paused_at,
+            &escrow_child.paused_by,
+        );
+        let refund_state = Self::read_target_pause_state(
+            &env,
+            &ContractTarget::Refund,
+            refund_child.globally_paused,
+            &refund_child.pause_reason,
+            refund_child.paused_at,
+            &refund_child.paused_by,
+        );
+
+        let mut target_pause_states = Vec::new(&env);
+        target_pause_states.push_back(payment_state.clone());
+        target_pause_states.push_back(escrow_state.clone());
+        target_pause_states.push_back(refund_state.clone());
+
         SystemStatus {
-            payment_paused: payment.get_pause_state().globally_paused,
+            payment_paused: payment_state.paused,
             payment_schema_version: payment.get_schema_version(),
-            escrow_paused: escrow.get_pause_state().globally_paused,
+            escrow_paused: escrow_state.paused,
             escrow_schema_version: escrow.get_schema_version(),
-            refund_paused: refund.get_pause_state().globally_paused,
+            refund_paused: refund_state.paused,
             refund_schema_version: refund.get_schema_version(),
+            payment_pause_state: payment_state,
+            escrow_pause_state: escrow_state,
+            refund_pause_state: refund_state,
+            target_pause_states,
+        }
+    }
+
+    fn target_symbol(env: &Env, target: &ContractTarget) -> Symbol {
+        match target {
+            ContractTarget::Payment => Symbol::new(env, "payment"),
+            ContractTarget::Escrow => Symbol::new(env, "escrow"),
+            ContractTarget::Refund => Symbol::new(env, "refund"),
         }
     }
 
@@ -843,6 +980,205 @@ impl AdminContract {
             ContractTarget::Escrow => DataKey::PendingEscrowRotation,
             ContractTarget::Refund => DataKey::PendingRefundRotation,
         }
+    }
+
+    fn target_address(env: &Env, target: &ContractTarget) -> Result<Address, Error> {
+        let key = match target {
+            ContractTarget::Payment => DataKey::PaymentContract,
+            ContractTarget::Escrow => DataKey::EscrowContract,
+            ContractTarget::Refund => DataKey::RefundContract,
+        };
+        env.storage()
+            .instance()
+            .get(&key)
+            .ok_or(Error::NotInitialized)
+    }
+
+    fn dependents(target: &ContractTarget) -> &'static [ContractTarget] {
+        match target {
+            ContractTarget::Payment => &[ContractTarget::Escrow, ContractTarget::Refund],
+            ContractTarget::Escrow => &[ContractTarget::Refund],
+            ContractTarget::Refund => &[],
+        }
+    }
+
+    fn dependencies(target: &ContractTarget) -> &'static [ContractTarget] {
+        match target {
+            ContractTarget::Payment => &[],
+            ContractTarget::Escrow => &[ContractTarget::Payment],
+            ContractTarget::Refund => &[ContractTarget::Payment, ContractTarget::Escrow],
+        }
+    }
+
+    fn targets_to_pause(
+        env: &Env,
+        target: &ContractTarget,
+        cascade_dependents: bool,
+    ) -> Vec<ContractTarget> {
+        let mut targets = Vec::new(env);
+        targets.push_back(target.clone());
+        if cascade_dependents {
+            for dependent in Self::dependents(target) {
+                targets.push_back(dependent.clone());
+            }
+        }
+        targets
+    }
+
+    fn pause_target(
+        env: &Env,
+        target: &ContractTarget,
+        pauser: &Address,
+        reason: &String,
+        cascaded_from: Option<Symbol>,
+    ) -> Result<(), Error> {
+        let address = Self::target_address(env, target)?;
+        match target {
+            ContractTarget::Payment => {
+                PaymentContractClient::new(env, &address).pause_contract(pauser, reason)
+            }
+            ContractTarget::Escrow => {
+                EscrowContractClient::new(env, &address).pause_contract(pauser, reason)
+            }
+            ContractTarget::Refund => {
+                RefundContractClient::new(env, &address).pause_contract(pauser, reason)
+            }
+        }
+        Self::write_target_pause_state(env, target, pauser, reason, cascaded_from);
+        Ok(())
+    }
+
+    fn unpause_target(env: &Env, target: &ContractTarget, pauser: &Address) -> Result<(), Error> {
+        let address = Self::target_address(env, target)?;
+        match target {
+            ContractTarget::Payment => {
+                PaymentContractClient::new(env, &address).unpause_contract(pauser)
+            }
+            ContractTarget::Escrow => {
+                EscrowContractClient::new(env, &address).unpause_contract(pauser)
+            }
+            ContractTarget::Refund => {
+                RefundContractClient::new(env, &address).unpause_contract(pauser)
+            }
+        }
+        Self::clear_target_pause_state(env, target, pauser);
+        Ok(())
+    }
+
+    fn write_target_pause_state(
+        env: &Env,
+        target: &ContractTarget,
+        pauser: &Address,
+        reason: &String,
+        cascaded_from: Option<Symbol>,
+    ) {
+        env.storage().instance().set(
+            &DataKey::TargetPauseState(target.clone()),
+            &TargetPauseState {
+                target: target.clone(),
+                paused: true,
+                reason: reason.clone(),
+                paused_at: env.ledger().timestamp(),
+                paused_by: pauser.clone(),
+                cascaded_from,
+            },
+        );
+    }
+
+    fn clear_target_pause_state(env: &Env, target: &ContractTarget, pauser: &Address) {
+        env.storage().instance().set(
+            &DataKey::TargetPauseState(target.clone()),
+            &TargetPauseState {
+                target: target.clone(),
+                paused: false,
+                reason: String::from_str(env, ""),
+                paused_at: 0,
+                paused_by: pauser.clone(),
+                cascaded_from: None,
+            },
+        );
+    }
+
+    fn read_target_pause_state(
+        env: &Env,
+        target: &ContractTarget,
+        globally_paused: bool,
+        child_reason: &String,
+        child_paused_at: u64,
+        child_paused_by: &Address,
+    ) -> TargetPauseState {
+        let metadata: Option<TargetPauseState> = env
+            .storage()
+            .instance()
+            .get(&DataKey::TargetPauseState(target.clone()));
+        TargetPauseState {
+            target: target.clone(),
+            paused: globally_paused,
+            reason: if globally_paused {
+                child_reason.clone()
+            } else {
+                metadata
+                    .as_ref()
+                    .map(|state| state.reason.clone())
+                    .unwrap_or_else(|| String::from_str(env, ""))
+            },
+            paused_at: if globally_paused { child_paused_at } else { 0 },
+            paused_by: if globally_paused {
+                child_paused_by.clone()
+            } else {
+                env.current_contract_address()
+            },
+            cascaded_from: metadata.and_then(|state| state.cascaded_from),
+        }
+    }
+
+    fn require_unpause_quorum(env: &Env, admins: &Vec<Address>) -> Result<(), Error> {
+        if admins.is_empty() {
+            return Err(Error::InsufficientApprovals);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        let stored_pauser: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Pauser)
+            .ok_or(Error::NotInitialized)?;
+
+        let mut unique: Vec<Address> = Vec::new(env);
+        for admin in admins.iter() {
+            if unique.contains(&admin) {
+                return Err(Error::DuplicateApproval);
+            }
+            if admin != stored_admin && admin != stored_pauser {
+                return Err(Error::Unauthorized);
+            }
+            unique.push_back(admin.clone());
+        }
+        for admin in unique.iter() {
+            admin.require_auth();
+        }
+        Ok(())
+    }
+
+    fn require_upstreams_unpaused(env: &Env, target: &ContractTarget) -> Result<(), Error> {
+        for dependency in Self::dependencies(target) {
+            let address = Self::target_address(env, dependency)?;
+            let child = Self::target_pause_state(env, &address);
+            if child.globally_paused {
+                return Err(Error::DependencyStillPaused);
+            }
+            let metadata: Option<TargetPauseState> = env
+                .storage()
+                .instance()
+                .get(&DataKey::TargetPauseState(dependency.clone()));
+            if metadata.map_or(false, |state| state.paused) {
+                return Err(Error::DependencyStillPaused);
+            }
+        }
+        Ok(())
     }
 
     /// Verifies the caller is the stored admin.

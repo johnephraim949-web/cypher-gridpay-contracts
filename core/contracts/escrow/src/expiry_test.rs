@@ -368,8 +368,8 @@ fn bounty_config() -> StaleThresholdConfig {
     StaleThresholdConfig {
         inactivity_seconds: 10_000,
         near_expiry_buffer_seconds: 500,
-        keeper_bounty_bps: 50,           // 0.5%
-        max_keeper_bounty_cap: 0,        // no hard cap
+        keeper_bounty_bps: 50,    // 0.5%
+        max_keeper_bounty_cap: 0, // no hard cap
         dormant_grace_notice_secs: 1_000,
     }
 }
@@ -416,7 +416,14 @@ fn test_settle_dormant_expired_escrow_after_grace() {
 
     env.ledger().set_timestamp(1_000);
     let escrow_id = client.create_escrow(
-        &customer, &merchant, &5_000_i128, &token, &2_000_u64, &0_u64, &3_000_u64, &false,
+        &customer,
+        &merchant,
+        &5_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &3_000_u64,
+        &false,
     );
 
     env.ledger().set_timestamp(3_500);
@@ -437,7 +444,10 @@ fn test_settle_dormant_expired_escrow_after_grace() {
 
     assert_eq!(token_client.balance(&keeper), keeper_balance_before + 25);
     // Customer favor (default); principal = 5000 - 50 fee = 4950.
-    assert_eq!(token_client.balance(&customer), customer_balance_before + 4_950);
+    assert_eq!(
+        token_client.balance(&customer),
+        customer_balance_before + 4_950
+    );
 
     let escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.status, EscrowStatus::Resolved);

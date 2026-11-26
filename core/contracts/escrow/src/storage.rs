@@ -6,8 +6,8 @@
 //! touched entry's TTL is extended automatically.
 
 use soroban_sdk::{
-    contracttype, symbol_short, xdr::ToXdr, Bytes, BytesN, Env, IntoVal, Symbol, TryFromVal, Val,
-    Vec,
+    contracttype, symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Symbol,
+    TryFromVal, Val, Vec,
 };
 
 /// Approximate number of ledgers closed per day (~5s per ledger).
@@ -28,6 +28,54 @@ pub fn extend_instance(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+}
+
+/// Approximate seconds per ledger (~5s).
+const SECS_PER_LEDGER: u64 = 5;
+
+/// Tiered storage lifetime policy for contract records.
+///
+/// Critical active locks (escrows that hold funds) get a deadline-aware TTL
+/// extension so they outlive their dispute window. Standard active records get
+/// the default persistent bump. Terminal audit records get a minimal bump
+/// since they no longer hold funds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageTier {
+    /// Funds-locking state: longest TTL, deadline-aware bumping.
+    CriticalActiveLock,
+    /// Still live but no funds at risk: standard 30-day bump.
+    StandardActive,
+    /// Terminal/audit-only: minimal 1-day bump.
+    TerminalAuditRecord,
+}
+
+impl StorageTier {
+    /// Base bump amount (in ledgers) for this tier.
+    pub fn bump_amount(&self) -> u32 {
+        match self {
+            StorageTier::CriticalActiveLock => PERSISTENT_BUMP_AMOUNT,
+            StorageTier::StandardActive => PERSISTENT_BUMP_AMOUNT,
+            StorageTier::TerminalAuditRecord => DAY_IN_LEDGERS,
+        }
+    }
+}
+
+/// Extends the instance TTL so it covers `deadline_secs + grace_secs` from now,
+/// using at least `tier.bump_amount()` ledgers. Returns the TTL target in
+/// ledgers.
+pub fn extend_instance_until(
+    env: &Env,
+    tier: StorageTier,
+    deadline_secs: u64,
+    grace_secs: u64,
+) -> u32 {
+    let now = env.ledger().timestamp();
+    let remaining = deadline_secs.saturating_sub(now);
+    let target_secs = remaining.saturating_add(grace_secs);
+    let target_ledgers = (target_secs.div_ceil(SECS_PER_LEDGER)) as u32;
+    let bump = tier.bump_amount().max(target_ledgers);
+    env.storage().instance().extend_ttl(bump, bump);
+    bump
 }
 
 /// Extends the TTL of a persistent entry. The entry must exist.
@@ -75,6 +123,46 @@ where
 {
     env.storage().persistent().set(key, value);
     extend_persistent(env, key);
+}
+
+/// Removes a persistent entry if present.
+pub fn remove_persistent<K>(env: &Env, key: &K)
+where
+    K: IntoVal<Env, Val>,
+{
+    env.storage().persistent().remove(key);
+}
+
+/// A pending mutual custom-split settlement proposal for a disputed escrow
+/// (Issue #433). Stored under `DataKey::MutualSettlement(escrow_id)`.
+///
+/// `nonce` increments on every (counter-)proposal so a counterparty can pin the
+/// exact terms it is accepting, preventing same-ledger front-running.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MutualSettlementProposal {
+    pub escrow_id: u64,
+    pub proposer: Address,
+    pub merchant_amount: i128,
+    pub customer_amount: i128,
+    pub expires_at: u64,
+    pub nonce: u32,
+}
+
+/// Buyer inspection window state for a delivered escrow (Issue #434). Stored
+/// under `DataKey::Inspection(escrow_id)`.
+///
+/// `delivered_at` is the ledger timestamp of the delivery attestation,
+/// `inspection_deadline` is when optimistic auto-release unlocks, `extended`
+/// enforces the single-use bounded extension, and `delivery_proof_hash` pins
+/// the attested delivery evidence.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct InspectionState {
+    pub delivered_at: u64,
+    pub inspection_deadline: u64,
+    pub extended: bool,
+    pub delivery_proof_hash: BytesN<32>,
 }
 
 /// Depth of the archived-record Merkle accumulator (Issue #243): up to 2^20

@@ -7,20 +7,20 @@ extern crate std;
 use escrow::EscrowContractClient;
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, token, xdr::ToXdr, Address,
-    Bytes, BytesN, Env, String, Symbol, TryFromVal, Val, Vec,
+    Bytes, BytesN, Env, String, Symbol, TryFromVal, U256, Val, Vec,
 };
 
 pub mod reentrancy;
 pub mod storage;
 use storage::StorageTier;
-#[path = "../../escrow/src/fixed_math.rs"]
-pub mod fixed_math;
 mod archival;
 pub mod channels;
 mod finality;
+#[path = "../../escrow/src/fixed_math.rs"]
+pub mod fixed_math;
 mod reconciliation;
-pub use channels::DomainSeparator;
 pub use archival::{ArchivalConfig, CompactArchivedPayment};
+pub use channels::DomainSeparator;
 pub use finality::{FinalityFlag, FinalityRiskConfig};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +64,20 @@ pub enum ConfigKey {
     AllowedTokens,
     MaxForwardDepth,
     RelayerStipendBps,
+    /// Persistent: progress of a batched schema migration.
+    MigrationCursor,
+    /// Instance: true while a batched migration is running.
+    MigrationInProgress,
+    /// Sharded token whitelist: number of shards (persistent).
+    TokenWhitelistCount,
+    /// Sharded token whitelist: a single shard of addresses.
+    TokenWhitelistShard(u32),
+    TokenWhitelistShard(u32),
+    TokenWhitelistCount,
+    TokenLifecycle(Address),
+    TokenLiability(Address),
+    AddonBeneficiaryAllowed(Address),
+    RoundingAddonConfig(Address),
 }
 
 #[derive(Clone)]
@@ -125,6 +139,12 @@ pub enum FeatureKey {
     RelayerStipend(Address, Address),
     StreamingPaymentChannel(u64),
     StreamingPaymentChannelCounter,
+    PrepaidVault(u64),
+    PrepaidVaultCounter,
+    PrepaidLiability(Address),
+    TariffSchedule(u64),
+    TariffScheduleCounter,
+    SubscriptionTariff(u64),
 }
 
 #[derive(Clone)]
@@ -137,6 +157,9 @@ pub enum DataKey {
     Customer(CustomerDataKey),
     Merchant(MerchantDataKey),
     State(StateDataKey),
+    StorefrontConfig(Address, Symbol),
+    /// Isolated balance for (merchant, storefront_id, token), issue #428.
+    StorefrontBalance(Address, Symbol, Address),
 }
 
 /// Protocol-level administrative and execution errors for PaymentContract.
@@ -204,6 +227,14 @@ pub enum BasicError {
     // Issue #3: a string field contains raw PII (email, phone, or tax ID)
     // that must not be stored on the immutable public ledger.
     PiiDetected = 128,
+    /// A reentrant call was detected during a fund-moving entry point.
+    ReentrantCallDetected = 129,
+    /// `migrate_schema_step` was called with a batch size of 0.
+    InvalidMigrationBatch = 130,
+    /// A batched schema migration is running; state-changing entry points are blocked.
+    MigrationInProgress = 131,
+    /// Daily tier volume limit exceeded for this merchant.
+    DailyTierLimitExceeded = 132,
 }
 
 /// Errors relating to payment lifecycle, settlement, and scheduling.
@@ -271,6 +302,20 @@ pub enum PaymentError {
     FinalityWindowClosed = 228,
     /// Invalid finality risk configuration (#196).
     InvalidFinalityRiskConfig = 229,
+    /// Pre-authorization hold not found. Verify the auth ID (#426).
+    PreAuthNotFound = 230,
+    /// Pre-authorization has already been captured (#426).
+    PreAuthAlreadyCaptured = 231,
+    /// Pre-authorization has already been voided (#426).
+    PreAuthAlreadyVoided = 232,
+    /// Pre-authorization has expired (#426).
+    PreAuthExpired = 233,
+    /// Pre-authorization has not expired yet (#426).
+    PreAuthNotExpired = 234,
+    /// Capture amount exceeds the authorized maximum (#426).
+    CaptureExceedsMax = 235,
+    /// Capture amount must be strictly positive (#426).
+    InvalidCaptureAmount = 236,
 }
 
 /// Errors relating to recurring subscription plans, dunning cycles, and billing.
@@ -442,6 +487,67 @@ pub enum FeatureError {
     /// Structuring / smurfing detected: cumulative payment volume within the rolling window
     /// exceeds the large-payment threshold. Split the transaction or wait for the window to reset.
     StructuringDetected = 543,
+    /// Rebate pool not found.
+    RebatePoolNotFound = 548,
+    /// Rebate pool has not expired yet.
+    RebatePoolNotExpired = 549,
+    /// Invalid or tampered rebate Merkle proof.
+    InvalidRebateProof = 550,
+    /// Rebate claim index already claimed.
+    RebateClaimed = 551,
+    /// Rebate pool has insufficient unclaimed funds.
+    RebatePoolInsufficientFunds = 552,
+    /// Prepaid vault not found.
+    PrepaidVaultNotFound = 544,
+    /// Prepaid vault transfer is not allowed.
+    PrepaidVaultNotTransferable = 545,
+    /// Prepaid vault has insufficient balance.
+    PrepaidVaultInsufficientBalance = 546,
+    /// Prepaid vault is expired.
+    PrepaidVaultExpired = 547,
+    /// Prepaid vault merchant restriction mismatch.
+    PrepaidVaultMerchantMismatch = 548,
+    /// Token lifecycle transition is invalid for the token's current status.
+    InvalidTokenLifecycleTransition = 544,
+    /// Token still has outstanding on-chain liabilities and cannot be removed.
+    TokenStillHasLiabilities = 545,
+    /// Token removal or reactivation requires explicit multisig approval.
+    TokenLifecycleRequiresMultiSig = 546,
+    /// Insufficient or invalid multisig approvals supplied for a token lifecycle override.
+    InvalidTokenLifecycleApprovals = 547,
+}
+
+/// Issue #428: storefront sub-ledger errors. Kept in a separate enum because
+/// Soroban caps each `#[contracterror]` enum at 50 variants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum StorefrontError {
+    /// Storefront is not registered under this merchant.
+    NotFound = 600,
+    /// Storefront is deactivated; incoming payments are rejected.
+    Inactive = 601,
+    /// Merchant has reached the maximum number of storefronts.
+    LimitExceeded = 602,
+    /// Storefront ID is already registered under this merchant.
+    AlreadyExists = 603,
+    /// Storefront has less than the requested sweep amount.
+    InsufficientBalance = 604,
+    /// Sweep amount must be positive.
+    InvalidAmount = 605,
+}
+
+/// Issue #427: time-of-use tariff errors.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(u32)]
+#[contracterror]
+pub enum TariffError {
+    /// Bands must be bounded, disjoint, and cover [0, 1440) exactly once.
+    InvalidSchedule = 700,
+    /// Schedule not found or no longer active.
+    ScheduleNotFound = 701,
+    /// Tariff cannot reprice usage already reported in the current cycle.
+    NotAttachable = 702,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -451,6 +557,8 @@ pub enum Error {
     Subscription(SubscriptionError),
     Proposal(ProposalError),
     Feature(FeatureError),
+    Storefront(StorefrontError),
+    Tariff(TariffError),
 }
 
 impl Error {
@@ -466,6 +574,8 @@ impl Error {
             Error::Subscription(e) => *e as u32,
             Error::Proposal(e) => *e as u32,
             Error::Feature(e) => *e as u32,
+            Error::Storefront(e) => *e as u32,
+            Error::Tariff(e) => *e as u32,
         }
     }
 }
@@ -487,19 +597,26 @@ impl TryFrom<soroban_sdk::Error> for Error {
     fn try_from(error: soroban_sdk::Error) -> Result<Self, Self::Error> {
         if error.is_type(soroban_sdk::xdr::ScErrorType::Contract) {
             let code = error.get_code();
-            if code >= 500 && code <= 543 {
+            if code >= 600 && code <= 605 {
+                return Ok(Error::Storefront(unsafe { core::mem::transmute(code) }));
+            }
+            if code >= 700 && code <= 702 {
+                return Ok(Error::Tariff(unsafe { core::mem::transmute(code) }));
+            }
+            if code >= 500 && code <= 552 {
+            if code >= 500 && code <= 548 {
                 return Ok(Error::Feature(unsafe { core::mem::transmute(code) }));
             }
             if code >= 400 && code <= 406 {
                 return Ok(Error::Proposal(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 300 && code <= 318 {
+            if code >= 300 && code <= 323 {
                 return Ok(Error::Subscription(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 200 && code <= 229 {
+            if code >= 200 && code <= 236 {
                 return Ok(Error::Payment(unsafe { core::mem::transmute(code) }));
             }
-            if code >= 100 && code <= 128 {
+            if code >= 100 && code <= 132 {
                 return Ok(Error::Basic(unsafe { core::mem::transmute(code) }));
             }
         }
@@ -544,6 +661,10 @@ pub enum CustomerDataKey {
     HourCount(Address, u32),
     /// Waived-transaction counter per promotional campaign and customer address.
     FeeWaiverUses(u64, Address),
+    /// Rolling velocity-window start timestamp for structuring detection.
+    VelocityWindowStart(Address),
+    /// Accumulated volume within the rolling velocity window.
+    VelocityWindowVolume(Address),
 }
 
 // Merchant-specific data keys
@@ -571,6 +692,9 @@ pub enum MerchantDataKey {
     ActiveSubscriptionIndex(u64),
     // Issue #23: 24-hour aggregate transaction volume per merchant, bucketed by day
     DailyVolume(Address, u64),
+    // Issue #428: storefront cap and payment→storefront routing.
+    StorefrontCount(Address),
+    StorefrontPayment(u64),
 }
 
 // State and proposal data keys
@@ -592,6 +716,12 @@ pub enum StateDataKey {
     PartialPaymentRecord(u64, u32), // payment_id, installment_number
     SettlementFinalized(u64),
     ScheduledPaymentCounter,
+    // Pre-authorization holds (#426)
+    PreAuth(u64),
+    PreAuthCounter,
+    RebatePool(u64),
+    RebatePoolCounter,
+    RebateClaimedBitmap(u64, u32),
 }
 
 #[derive(Clone)]
@@ -612,6 +742,20 @@ pub enum PaymentStatus {
     Refunded,
     PartialRefunded,
     Cancelled,
+}
+
+/// Lifecycle status of a pre-authorization hold (#426).
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub enum PreAuthStatus {
+    /// Funds are locked in the contract awaiting capture or void.
+    Authorized,
+    /// A partial or full capture has been settled; remainder refunded.
+    Captured,
+    /// The hold was voided and all locked funds returned to the customer.
+    Voided,
+    /// The hold expired without capture; funds released back to the customer.
+    Expired,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -931,6 +1075,47 @@ pub struct PaymentCreated {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorefrontPaymentCreated {
+    pub payment_id: u64,
+    pub merchant: Address,
+    pub storefront_id: Symbol,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StorefrontBalanceSwept {
+    pub merchant: Address,
+    pub storefront_id: Symbol,
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TariffScheduleCreated {
+    pub schedule_id: u64,
+    pub merchant: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TariffAttached {
+    pub subscription_id: u64,
+    pub schedule_id: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TouUsageReported {
+    pub subscription_id: u64,
+    pub units: u64,
+    pub cost: i128,
+    pub band_start_minute_utc: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentCompleted {
     pub payment_id: u64,
     pub merchant: Address,
@@ -953,6 +1138,46 @@ pub struct PaymentCancelled {
     pub timestamp: u64,
 }
 
+// ── Pre-authorization hold events (#426) ────────────────────────────────────
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreAuthCreated {
+    pub auth_id: u64,
+    pub customer: Address,
+    pub merchant: Address,
+    pub token: Address,
+    pub max_amount: i128,
+    pub expires_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreAuthCaptured {
+    pub auth_id: u64,
+    pub merchant: Address,
+    pub capture_amount: i128,
+    pub fee_amount: i128,
+    pub refund_amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreAuthVoided {
+    pub auth_id: u64,
+    pub voided_by: Address,
+    pub refund_amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PaymentAddonRouted {
+    pub payment_id: u64,
+    pub beneficiary: Address,
+    pub token: Address,
+    pub addon_amount: i128,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaymentExpired {
@@ -960,6 +1185,26 @@ pub struct PaymentExpired {
     pub customer: Address,
     pub refunded_amount: i128,
     pub expired_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenDeprecated {
+    pub token: Address,
+    pub reason: String,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenRemoved {
+    pub token: Address,
+    pub forced: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenReactivated {
+    pub token: Address,
 }
 
 #[contractevent]
@@ -1102,6 +1347,42 @@ pub struct MeteredSubscription {
     pub billing_cap: Option<i128>,
     pub last_reset_at: u64,
     pub max_units_per_period: Option<u64>,
+    /// TOU-accrued cost for the current cycle; 0 when no tariff is attached.
+    pub accumulated_cost: i128,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct StorefrontConfig {
+    pub storefront_id: Symbol,
+    pub parent_merchant: Address,
+    pub payout_destination: Address,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct StorefrontPaymentRoute {
+    pub parent_merchant: Address,
+    pub storefront_id: Symbol,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct TariffBand {
+    pub start_minute_utc: u32,
+    pub end_minute_utc: u32,
+    pub rate_per_unit: i128,
+    pub weekend_discount_bps: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct TariffSchedule {
+    pub schedule_id: u64,
+    pub bands: Vec<TariffBand>,
+    pub effective_from: u64,
+    pub active: bool,
 }
 
 #[derive(Clone)]
@@ -1158,6 +1439,41 @@ pub struct ChannelSettled {
 pub struct ChannelExpiredClosed {
     pub channel_id: u64,
     pub refunded_to: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrepaidVaultDeposited {
+    pub vault_id: u64,
+    pub funder: Address,
+    pub beneficiary: Address,
+    pub token: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrepaidVaultSpent {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub merchant: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrepaidVaultWithdrawn {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PrepaidVaultTransferred {
+    pub vault_id: u64,
+    pub from: Address,
+    pub to: Address,
 }
 
 #[contractevent]
@@ -1395,6 +1711,39 @@ pub struct Payment {
     pub refunded_amount: i128,
 }
 
+/// Pre-authorization hold record (#426).
+///
+/// Reserves `max_amount` of the customer's tokens inside the contract. A
+/// later `capture_payment` settles only the consumed `captured_amount` (net of
+/// protocol fee) and atomically refunds the remainder. `void_authorization`
+/// releases the full hold.
+#[derive(Clone)]
+#[contracttype]
+pub struct PreAuthPayment {
+    /// Unique identifier returned by `authorize_payment`.
+    pub auth_id: u64,
+    /// The customer whose tokens are locked.
+    pub customer: Address,
+    /// The merchant authorised to capture from the hold.
+    pub merchant: Address,
+    /// The token whose `max_amount` was locked.
+    pub token: Address,
+    /// Maximum amount reserved upfront.
+    pub max_amount: i128,
+    /// Amount actually captured (0 until `capture_payment` runs).
+    pub captured_amount: i128,
+    /// Protocol fee charged on `captured_amount` only, never `max_amount`.
+    pub fee_amount: i128,
+    /// Ledger timestamp after which the hold may be expired/reclaimed.
+    pub expires_at: u64,
+    /// Ledger timestamp the hold was created.
+    pub created_at: u64,
+    /// Current lifecycle state.
+    pub status: PreAuthStatus,
+    /// Arbitrary merchant/customer reference string.
+    pub metadata: String,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub struct EphemeralInvoiceRoute {
@@ -1598,6 +1947,30 @@ pub enum FeeTier {
     Enterprise, // >= configured enterprise volume
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum TokenLifecycleStatus {
+    Active,
+    DrainOnly,
+    Removed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub enum RoundingMode {
+    RoundUpToUnit(i128),
+    FixedBps(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct RoundingAddonConfig {
+    pub beneficiary: Address,
+    pub mode: RoundingMode,
+    pub max_addon_amount: i128,
+    pub enabled: bool,
+}
+
 #[derive(Clone)]
 #[contracttype]
 pub struct FeeConfig {
@@ -1640,6 +2013,18 @@ pub struct FeeWaiver {
     pub valid_until: u64,
     pub reason: String,
     pub granted_by: Address,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct RebatePool {
+    pub pool_id: u64,
+    pub sponsor: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_funded: i128,
+    pub total_claimed: i128,
+    pub expires_at: u64,
 }
 
 #[derive(Clone)]
@@ -1699,6 +2084,33 @@ pub struct AdminAdded {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AdminRemoved {
     pub admin: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebatePoolCreated {
+    pub pool_id: u64,
+    pub sponsor: Address,
+    pub token: Address,
+    pub total_funded: i128,
+    pub expires_at: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebateClaimed {
+    pub pool_id: u64,
+    pub claimant: Address,
+    pub index: u32,
+    pub amount: i128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RebatePoolReclaimed {
+    pub pool_id: u64,
+    pub sponsor: Address,
+    pub amount: i128,
 }
 
 #[contractevent]
@@ -2021,6 +2433,18 @@ pub struct FeeSweepRecord {
     pub swept_at: u64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PrepaidVault {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub merchant: Option<Address>,
+    pub token: Address,
+    pub balance: i128,
+    pub expires_at: Option<u64>,
+    pub transferable: bool,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub struct CustomerSpendLimit {
@@ -2132,6 +2556,14 @@ const MAX_TRIAL_DURATION: u64 = 90 * SECONDS_PER_DAY; // 90 days max trial
 const MAX_TRIAL_NOTICE_LEAD_SECS: u64 = 30 * SECONDS_PER_DAY;
 const DEFAULT_TRIAL_NOTICE_MIN_LEAD_SECS: u64 = SECONDS_PER_DAY;
 const POST_TRIAL_CANCEL_GRACE_SECS: u64 = SECONDS_PER_DAY;
+/// Dispute grace period that a pending payment's TTL must outlive beyond its
+/// expiry, ensuring the instance stays live long enough for dispute handling.
+const PAYMENT_DISPUTE_GRACE_SECS: u64 = 7 * SECONDS_PER_DAY;
+/// Maximum number of payment IDs `batch_bump_critical` accepts per call.
+const MAX_TTL_BUMP_BATCH: u32 = 50;
+const MAX_STOREFRONTS_PER_MERCHANT: u32 = 64;
+const MAX_TARIFF_BANDS: u32 = 8;
+const MINUTES_PER_DAY: u32 = 1440;
 
 // Fee tier volume thresholds (raw token units)
 const PREMIUM_VOLUME_THRESHOLD: i128 = 10_000;
@@ -2601,9 +3033,10 @@ impl PaymentContract {
                 Self::migrate_v2_to_v3(&env);
             }
             cursor.completed = true;
-            env.storage()
-                .instance()
-                .set(&DataKey::Config(ConfigKey::SchemaVersion), &cursor.to_version);
+            env.storage().instance().set(
+                &DataKey::Config(ConfigKey::SchemaVersion),
+                &cursor.to_version,
+            );
             env.storage()
                 .instance()
                 .remove(&DataKey::Config(ConfigKey::MigrationInProgress));
@@ -3236,9 +3669,9 @@ impl PaymentContract {
                 payment_id,
             )))
             .ok_or(Error::Payment(PaymentError::NotFound))?;
-        let mut reveal = vault.to_xdr(&env);
+        let mut reveal = vault.clone().to_xdr(&env);
         reveal.append(&secret.to_xdr(&env));
-        if env.crypto().sha256(&reveal) != route.ephemeral_invoice_commitment {
+        if env.crypto().sha256(&reveal).to_bytes() != route.ephemeral_invoice_commitment {
             return Err(Error::Payment(PaymentError::HashMismatch));
         }
 
@@ -3286,7 +3719,8 @@ impl PaymentContract {
         amount: i128,
         scheduled_at: u64,
     ) -> Result<u64, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "schedule_payment")?;
         customer.require_auth();
         if amount <= 0 {
@@ -3295,6 +3729,9 @@ impl PaymentContract {
         let now = env.ledger().timestamp();
         if scheduled_at <= now {
             return Err(Error::Payment(PaymentError::InvalidScheduleTime));
+        }
+        if !Self::is_token_allowed(&env, &token) {
+            return Err(Error::Payment(PaymentError::TokenNotAllowed));
         }
 
         let token_client = token::Client::new(&env, &token);
@@ -3311,7 +3748,7 @@ impl PaymentContract {
             payment_id,
             customer: customer.clone(),
             merchant: merchant.clone(),
-            token,
+            token: token.clone(),
             amount,
             scheduled_at,
             executed: false,
@@ -3325,6 +3762,7 @@ impl PaymentContract {
             &DataKey::State(StateDataKey::ScheduledPaymentCounter),
             &payment_id,
         );
+        Self::increase_token_liability(&env, &token, amount);
 
         (PaymentCreated {
             payment_id,
@@ -3375,6 +3813,7 @@ impl PaymentContract {
             scheduled.token.clone(),
             scheduled.amount,
         )?;
+        Self::decrease_token_liability(&env, &scheduled.token, scheduled.amount);
         scheduled.executed = true;
         env.storage().instance().set(
             &DataKey::State(StateDataKey::ScheduledPayment(payment_id)),
@@ -3397,7 +3836,8 @@ impl PaymentContract {
         caller: Address,
         payment_id: u64,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "cancel_scheduled_payment")?;
         caller.require_auth();
         let mut scheduled: ScheduledPayment = env
@@ -3425,6 +3865,7 @@ impl PaymentContract {
         let token_client = token::Client::new(&env, &scheduled.token);
         let contract_address = env.current_contract_address();
         token_client.transfer(&contract_address, &scheduled.customer, &scheduled.amount);
+        Self::decrease_token_liability(&env, &scheduled.token, scheduled.amount);
         scheduled.cancelled = true;
         env.storage().instance().set(
             &DataKey::State(StateDataKey::ScheduledPayment(payment_id)),
@@ -3467,6 +3908,7 @@ impl PaymentContract {
                     &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant.clone())),
                     &schedule,
                 );
+                Self::increase_token_liability(env, &token, amount);
                 return Ok(());
             }
         }
@@ -3539,7 +3981,8 @@ impl PaymentContract {
     /// `Ok(())` on success, or an error if the payout schedule is not found, the payout
     /// period has not elapsed, or there is nothing to settle.
     pub fn trigger_scheduled_payout(env: Env, merchant: Address) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         merchant.require_auth();
         let mut schedule: PayoutSchedule = env
             .storage()
@@ -3571,6 +4014,7 @@ impl PaymentContract {
             &DataKey::Merchant(MerchantDataKey::PayoutSchedule(merchant.clone())),
             &schedule,
         );
+        Self::decrease_token_liability(&env, &schedule.token, payout_amount);
 
         // Interaction: External token transfer
         let token_client = token::Client::new(&env, &schedule.token);
@@ -3729,7 +4173,7 @@ impl PaymentContract {
             customer: customer.clone(),
             merchant: merchant.clone(),
             amount,
-            token,
+            token: token.clone(),
             currency,
             status: PaymentStatus::Pending,
             created_at: current_timestamp,
@@ -4004,6 +4448,7 @@ impl PaymentContract {
 
         // Funds are now held: storage must outlive the payment's deadline.
         Self::keep_payment_alive(&env, payment_id);
+        Self::increase_token_liability(env, &token, amount);
 
         Ok(payment_id)
     }
@@ -4140,7 +4585,8 @@ impl PaymentContract {
         metadata: String,
         auto_release_on_complete: bool,
     ) -> Result<(u64, u64), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "create_escrowed_payment")?;
         Self::require_merchant_not_paused(&env, &merchant)?;
         let payment_id = PaymentContract::create_payment(
@@ -4686,7 +5132,8 @@ impl PaymentContract {
     /// `Ok(())` on success, or an error if the payment is not found, is not in Pending
     /// status, has no expiration set, or has not yet expired.
     pub fn expire_payment(env: Env, payment_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         // Retrieve payment from storage
         if !env
             .storage()
@@ -4738,6 +5185,7 @@ impl PaymentContract {
 
         // Update payment status to Cancelled
         payment.status = PaymentStatus::Cancelled;
+        Self::decrease_token_liability(&env, &payment.token, payment.amount);
 
         // Store updated payment back to storage
         env.storage()
@@ -4770,7 +5218,8 @@ impl PaymentContract {
     /// found, is not in Pending status, is expired, or the multisig threshold is not met.
     /// Returns `ProposalError::RequiresMultiSig` if a multisig proposal was auto-created.
     pub fn complete_payment(env: Env, admin: Address, payment_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "complete_payment")?;
         admin.require_auth();
 
@@ -4848,6 +5297,168 @@ impl PaymentContract {
         Ok(())
     }
 
+    fn addon_config(env: &Env, merchant: &Address) -> Option<RoundingAddonConfig> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::RoundingAddonConfig(
+                merchant.clone(),
+            )))
+    }
+
+    fn is_addon_beneficiary_allowed(env: &Env, beneficiary: &Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::AddonBeneficiaryAllowed(
+                beneficiary.clone(),
+            )))
+            .unwrap_or(false)
+    }
+
+    fn compute_addon_amount(
+        base_amount: i128,
+        mode: &RoundingMode,
+        max_addon_amount: i128,
+    ) -> Result<i128, Error> {
+        let mut addon = match mode {
+            RoundingMode::RoundUpToUnit(unit) => {
+                if *unit <= 0 {
+                    return Err(Error::Basic(BasicError::InvalidAmount));
+                }
+                let rem = base_amount % *unit;
+                if rem == 0 {
+                    0
+                } else {
+                    *unit - rem
+                }
+            }
+            RoundingMode::FixedBps(bps) => {
+                if *bps > 10_000 {
+                    return Err(Error::Basic(BasicError::InvalidAmount));
+                }
+                base_amount.saturating_mul(*bps as i128) / 10_000
+            }
+        };
+        if addon < 0 {
+            addon = 0;
+        }
+        if max_addon_amount < 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+        if addon > max_addon_amount {
+            addon = max_addon_amount;
+        }
+        Ok(addon)
+    }
+
+    pub fn set_addon_beneficiary_allowed(
+        env: Env,
+        admin: Address,
+        beneficiary: Address,
+        allowed: bool,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        let config: MultiSigConfig = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MultiSigConfig))
+            .ok_or(Error::Basic(BasicError::MultiSigNotInitialized))?;
+        if !config.admins.contains(&admin) {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::AddonBeneficiaryAllowed(beneficiary)),
+            &allowed,
+        );
+        Ok(())
+    }
+
+    pub fn set_rounding_addon_config(
+        env: Env,
+        merchant: Address,
+        config: RoundingAddonConfig,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        Self::require_merchant_not_paused(&env, &merchant)?;
+        if config.max_addon_amount < 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+        match config.mode {
+            RoundingMode::RoundUpToUnit(u) => {
+                if u <= 0 {
+                    return Err(Error::Basic(BasicError::InvalidAmount));
+                }
+            }
+            RoundingMode::FixedBps(bps) => {
+                if bps > 10_000 {
+                    return Err(Error::Basic(BasicError::InvalidAmount));
+                }
+            }
+        }
+        if config.enabled && !Self::is_addon_beneficiary_allowed(&env, &config.beneficiary) {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::RoundingAddonConfig(merchant)),
+            &config,
+        );
+        Ok(())
+    }
+
+    pub fn pay_with_addon(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        amount: i128,
+        token: Address,
+        currency: Currency,
+        expiration_duration: u64,
+        metadata: String,
+        addon_amount: i128,
+    ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "pay_with_addon")?;
+        customer.require_auth();
+        if addon_amount < 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+        let cfg =
+            Self::addon_config(&env, &merchant).ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        if !cfg.enabled {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+        if !Self::is_addon_beneficiary_allowed(&env, &cfg.beneficiary) {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        let expected = Self::compute_addon_amount(amount, &cfg.mode, cfg.max_addon_amount)?;
+        if addon_amount != expected {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+
+        let payment_id = Self::do_create_payment(
+            &env,
+            customer.clone(),
+            merchant.clone(),
+            amount,
+            token.clone(),
+            currency,
+            expiration_duration,
+            metadata,
+        )?;
+        if addon_amount > 0 {
+            let token_client = token::Client::new(&env, &token);
+            token_client.transfer(&customer, &cfg.beneficiary, &addon_amount);
+            PaymentAddonRouted {
+                payment_id,
+                beneficiary: cfg.beneficiary,
+                token,
+                addon_amount,
+            }
+            .publish(&env);
+        }
+        Ok(payment_id)
+    }
+
     fn do_complete_payment(env: &Env, payment_id: u64) -> Result<(), Error> {
         if env
             .storage()
@@ -4910,6 +5521,8 @@ impl PaymentContract {
             payment.amount
         };
 
+        Self::decrease_token_liability(env, &payment.token, payment.amount);
+
         // Deduct platform fee (if configured) and get net amount for merchant
         let (net_amount, fee_amount) = PaymentContract::deduct_fee(
             env,
@@ -4921,13 +5534,26 @@ impl PaymentContract {
             payment.currency.clone(),
         );
 
+        // Storefront settlements are held in their own sub-ledger until the
+        // parent merchant sweeps them, so the immediate-payout finality hold
+        // does not apply (issue #428).
+        let storefront_route: Option<StorefrontPaymentRoute> = env
+            .storage()
+            .instance()
+            .get(&DataKey::Merchant(MerchantDataKey::StorefrontPayment(
+                payment_id,
+            )));
+
         // Check finality delay config (#219)
         let finality: Option<FinalityConfig> = env
             .storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::FinalityConfig));
         if let Some(ref fc) = finality {
-            if fc.active && payment.amount >= fc.min_amount_threshold {
+            if storefront_route.is_none()
+                && fc.active
+                && payment.amount >= fc.min_amount_threshold
+            {
                 // Hold funds — create PendingSettlement instead of transferring
                 let release_at = env.ledger().timestamp()
                     + finality::compute_required_finality_delay(env, &payment, fc.delay_seconds);
@@ -5042,15 +5668,32 @@ impl PaymentContract {
             &merchant_amount,
         );
 
-        PaymentContract::settle_or_accumulate(
-            env,
-            payment.merchant.clone(),
-            payment.token.clone(),
-            merchant_amount,
-        )?;
+        if let Some(ref route) = storefront_route {
+            // Credit the isolated (merchant, storefront, token) sub-ledger
+            // instead of the parent's flat payout schedule (issue #428).
+            let balance_key = DataKey::StorefrontBalance(
+                route.parent_merchant.clone(),
+                route.storefront_id.clone(),
+                payment.token.clone(),
+            );
+            let balance: i128 = storage::get_storefront_balance(env, &balance_key);
+            storage::set_storefront_balance(
+                env,
+                &balance_key,
+                balance.saturating_add(merchant_amount),
+            );
+            Self::increase_token_liability(env, &payment.token, merchant_amount);
+        } else {
+            PaymentContract::settle_or_accumulate(
+                env,
+                payment.merchant.clone(),
+                payment.token.clone(),
+                merchant_amount,
+            )?;
+        }
 
         // Forwarding only applies when funds were paid out immediately.
-        let payout_deferred = env
+        let payout_deferred = storefront_route.is_some() || env
             .storage()
             .instance()
             .get::<DataKey, PayoutSchedule>(&DataKey::Merchant(MerchantDataKey::PayoutSchedule(
@@ -5068,8 +5711,12 @@ impl PaymentContract {
             {
                 if forward_config.active {
                     // Calculate the forward amount based on forward_bps
-                    let forward_amount =
-                        fixed_math::mul_div_floor_or_panic(env, merchant_amount, forward_config.forward_bps as i128, 10000);
+                    let forward_amount = fixed_math::mul_div_floor_or_panic(
+                        env,
+                        merchant_amount,
+                        forward_config.forward_bps as i128,
+                        10000,
+                    );
 
                     // Transfer the forward amount from merchant to forward_to address
                     if forward_amount > 0 {
@@ -5505,7 +6152,8 @@ impl PaymentContract {
         payment_id: u64,
         amount: i128,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "pay_installment")?;
         customer.require_auth();
 
@@ -5850,6 +6498,7 @@ impl PaymentContract {
         env.storage()
             .instance()
             .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+        Self::decrease_token_liability(env, &payment.token, payment.amount);
 
         // #557: return any installments the customer already paid toward this
         // still-Pending payment before it becomes Refunded. A payment with no
@@ -6014,7 +6663,8 @@ impl PaymentContract {
     /// `Ok(())` on success, or an error if the payment is not found, is not in Pending
     /// status, or the caller is not the customer or merchant.
     pub fn cancel_payment(env: Env, caller: Address, payment_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "cancel_payment")?;
         caller.require_auth();
         PaymentContract::do_cancel_payment(&env, caller, payment_id)
@@ -6059,6 +6709,7 @@ impl PaymentContract {
         env.storage()
             .instance()
             .set(&DataKey::Payment(PaymentKey::Data(payment_id)), &payment);
+        Self::decrease_token_liability(env, &payment.token, payment.amount);
 
         // Update analytics
         let mut analytics: PaymentAnalytics = env
@@ -6274,24 +6925,12 @@ impl PaymentContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Adds a token to the list of allowed tokens for payments.
-    ///
-    /// # Arguments
-    /// * `admin` - The admin authorizing this change (must be in the multisig admin list)
-    /// * `token` - The SPL token address to add to the allowed list
-    ///
-    /// # Returns
-    /// `Ok(())` on success, or an error if the admin is unauthorized or multisig is not initialized.
     pub fn add_allowed_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
+        Self::require_token_admin(&env, &admin)?;
 
-        let config: MultiSigConfig = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::MultiSigConfig))
-            .ok_or(Error::Basic(BasicError::MultiSigNotInitialized))?;
-        if !config.admins.contains(&admin) {
-            return Err(Error::Basic(BasicError::Unauthorized));
+        if Self::token_status(&env, &token) == TokenLifecycleStatus::Removed {
+            return Err(Error::Feature(FeatureError::InvalidTokenLifecycleTransition));
         }
 
         let mut tokens = Self::load_allowed_tokens(&env);
@@ -6299,60 +6938,217 @@ impl PaymentContract {
             tokens.push_back(token);
             Self::store_allowed_tokens(&env, &tokens);
         }
-
         Ok(())
     }
 
-    /// Removes a token from the list of allowed tokens for payments.
-    ///
-    /// # Arguments
-    /// * `admin` - The admin authorizing this change (must be in the multisig admin list)
-    /// * `token` - The SPL token address to remove from the allowed list
-    ///
-    /// # Returns
-    /// `Ok(())` on success, or an error if the admin is unauthorized or multisig is not initialized.
+    pub fn deprecate_allowed_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        reason: String,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_token_admin(&env, &admin)?;
+
+        if Self::token_status(&env, &token) != TokenLifecycleStatus::Active {
+            return Err(Error::Feature(
+                FeatureError::InvalidTokenLifecycleTransition,
+            ));
+        }
+
+        Self::set_token_status(&env, &token, TokenLifecycleStatus::DrainOnly);
+        TokenDeprecated { token, reason }.publish(&env);
+        Ok(())
+    }
+
     pub fn remove_allowed_token(env: Env, admin: Address, token: Address) -> Result<(), Error> {
         admin.require_auth();
+        Self::require_token_admin(&env, &admin)?;
 
+        let status = Self::token_status(&env, &token);
+        if status == TokenLifecycleStatus::Removed {
+            return Err(Error::Feature(
+                FeatureError::InvalidTokenLifecycleTransition,
+            ));
+        }
+        if Self::token_liability(&env, &token) > 0 {
+            return Err(Error::Feature(FeatureError::TokenStillHasLiabilities));
+        }
+
+        Self::set_token_status(&env, &token, TokenLifecycleStatus::Removed);
+        Self::remove_token_from_whitelist(&env, &token);
+        TokenRemoved {
+            token,
+            forced: false,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn force_remove_allowed_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        approvers: Vec<Address>,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_lifecycle_approvals(&env, &admin, &approvers)?;
+
+        Self::set_token_status(&env, &token, TokenLifecycleStatus::Removed);
+        Self::remove_token_from_whitelist(&env, &token);
+        TokenRemoved {
+            token,
+            forced: true,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn reactivate_removed_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+        approvers: Vec<Address>,
+    ) -> Result<(), Error> {
+        admin.require_auth();
+        Self::require_lifecycle_approvals(&env, &admin, &approvers)?;
+
+        if Self::token_status(&env, &token) != TokenLifecycleStatus::Removed {
+            return Err(Error::Feature(
+                FeatureError::InvalidTokenLifecycleTransition,
+            ));
+        }
+
+        Self::set_token_status(&env, &token, TokenLifecycleStatus::Active);
+        let mut tokens = Self::load_allowed_tokens(&env);
+        if !tokens.contains(&token) {
+            tokens.push_back(token.clone());
+            Self::store_allowed_tokens(&env, &tokens);
+        }
+        TokenReactivated { token }.publish(&env);
+        Ok(())
+    }
+
+    pub fn get_token_status(env: Env, token: Address) -> TokenLifecycleStatus {
+        Self::token_status(&env, &token)
+    }
+
+    fn token_status(env: &Env, token: &Address) -> TokenLifecycleStatus {
+        Self::stored_token_status(env, token).unwrap_or_else(|| {
+            let tokens = Self::load_allowed_tokens(env);
+            if tokens.is_empty() || tokens.contains(token) {
+                TokenLifecycleStatus::Active
+            } else {
+                TokenLifecycleStatus::Removed
+            }
+        })
+    }
+
+    pub fn get_allowed_tokens(env: Env) -> Vec<Address> {
+        let tokens = Self::load_allowed_tokens(&env);
+        let mut active = Vec::new(&env);
+        for token in tokens.iter() {
+            if Self::stored_token_status(&env, &token).unwrap_or(TokenLifecycleStatus::Active)
+                == TokenLifecycleStatus::Active
+            {
+                active.push_back(token);
+            }
+        }
+        active
+    }
+
+    fn require_token_admin(env: &Env, admin: &Address) -> Result<MultiSigConfig, Error> {
         let config: MultiSigConfig = env
             .storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::MultiSigConfig))
             .ok_or(Error::Basic(BasicError::MultiSigNotInitialized))?;
-        if !config.admins.contains(&admin) {
+        if !config.admins.contains(admin) {
             return Err(Error::Basic(BasicError::Unauthorized));
         }
+        Ok(config)
+    }
 
-        let tokens = Self::load_allowed_tokens(&env);
-        let mut updated = Vec::new(&env);
-        for entry in tokens.iter() {
-            if entry != token {
-                updated.push_back(entry);
+    fn require_lifecycle_approvals(
+        env: &Env,
+        admin: &Address,
+        approvers: &Vec<Address>,
+    ) -> Result<(), Error> {
+        let config = Self::require_token_admin(env, admin)?;
+        let mut unique: Vec<Address> = Vec::new(env);
+        for approver in approvers.iter() {
+            if !config.admins.contains(&approver) {
+                return Err(Error::Feature(FeatureError::InvalidTokenLifecycleApprovals));
+            }
+            approver.require_auth();
+            if !unique.contains(&approver) {
+                unique.push_back(approver);
             }
         }
-        Self::store_allowed_tokens(&env, &updated);
-
+        if unique.len() < config.required_signatures as u32 {
+            return Err(Error::Feature(FeatureError::InvalidTokenLifecycleApprovals));
+        }
         Ok(())
     }
 
-    /// Returns the list of allowed payment tokens.
-    ///
-    /// If no tokens have been configured, returns an empty list, which means all tokens are permitted.
-    ///
-    /// # Returns
-    /// A vector of token addresses that have been explicitly allowed by an admin.
-    /// Returns the list of all allowed tokens for payments.
-    ///
-    /// # Returns
-    /// A `Vec<Address>` of allowed token addresses. Returns an empty vector if none are configured.
-    pub fn get_allowed_tokens(env: Env) -> Vec<Address> {
-        Self::load_allowed_tokens(&env)
+    fn remove_token_from_whitelist(env: &Env, token: &Address) {
+        let tokens = Self::load_allowed_tokens(env);
+        let mut updated = Vec::new(env);
+        for entry in tokens.iter() {
+            if entry != *token {
+                updated.push_back(entry);
+            }
+        }
+        Self::store_allowed_tokens(env, &updated);
     }
 
-    /// The token whitelist. It lives in persistent shards
-    /// (`TokenWhitelistShard`) with only its length in instance storage, so
-    /// a long whitelist does not inflate every invocation. A contract not yet
-    /// migrated to schema 3 still has it under the legacy instance key.
+    fn stored_token_status(env: &Env, token: &Address) -> Option<TokenLifecycleStatus> {
+        storage::get_persistent(
+            env,
+            &DataKey::Config(ConfigKey::TokenLifecycle(token.clone())),
+        )
+    }
+
+    fn set_token_status(env: &Env, token: &Address, status: TokenLifecycleStatus) {
+        storage::set_persistent(
+            env,
+            &DataKey::Config(ConfigKey::TokenLifecycle(token.clone())),
+            &status,
+        );
+    }
+
+    fn token_liability(env: &Env, token: &Address) -> i128 {
+        storage::get_persistent(
+            env,
+            &DataKey::Config(ConfigKey::TokenLiability(token.clone())),
+        )
+        .unwrap_or(0)
+    }
+
+    fn increase_token_liability(env: &Env, token: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        let updated = Self::token_liability(env, token).saturating_add(amount);
+        storage::set_persistent(
+            env,
+            &DataKey::Config(ConfigKey::TokenLiability(token.clone())),
+            &updated,
+        );
+    }
+
+    fn decrease_token_liability(env: &Env, token: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        let updated = Self::token_liability(env, token).saturating_sub(amount);
+        storage::set_persistent(
+            env,
+            &DataKey::Config(ConfigKey::TokenLiability(token.clone())),
+            &updated,
+        );
+    }
+
     fn load_allowed_tokens(env: &Env) -> Vec<Address> {
         storage::read_sharded(
             env,
@@ -6367,8 +7163,6 @@ impl PaymentContract {
         .unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Writes the token whitelist in sharded form and drops the legacy
-    /// instance copy.
     fn store_allowed_tokens(env: &Env, tokens: &Vec<Address>) {
         storage::write_sharded(
             env,
@@ -6381,13 +7175,8 @@ impl PaymentContract {
             .remove(&DataKey::Config(ConfigKey::AllowedTokens));
     }
 
-    // Mirrors the refund contract's token-registry bypass (Issue #191): an
-    // empty allowlist means the allowlist hasn't been configured yet, so all
-    // tokens are permitted until an admin opts in by calling
-    // `add_allowed_token`.
     fn is_token_allowed(env: &Env, token: &Address) -> bool {
-        let tokens = Self::load_allowed_tokens(env);
-        tokens.is_empty() || tokens.contains(token)
+        Self::token_status(env, token) == TokenLifecycleStatus::Active
     }
 
     const ACTIVE_SUBSCRIPTION_PAGE_SIZE: u64 = 100;
@@ -6738,6 +7527,9 @@ impl PaymentContract {
             // return Err(Error::InvalidInterval);
             return Err(Error::Basic(BasicError::InvalidInterval));
         }
+        if !Self::is_token_allowed(&env, &token) {
+            return Err(Error::Payment(PaymentError::TokenNotAllowed));
+        }
 
         let counter: u64 = env
             .storage()
@@ -6989,7 +7781,7 @@ impl PaymentContract {
 
     /// Record customer consent for a new trial conversion amount.
     /// Any previous conversion notice is invalidated and must be emitted again.
-    pub fn authorize_trial_conversion_amount(
+    pub fn authorize_trial_conversion(
         env: Env,
         customer: Address,
         subscription_id: u64,
@@ -7071,7 +7863,7 @@ impl PaymentContract {
             .trial_data
             .post_conversion_usage_units
             .checked_add(units)
-            .ok_or(Error::Basic(BasicError::BillingOverflow))?;
+            .ok_or(Error::Payment(PaymentError::BillingOverflow))?;
         let accumulated_units = sub.trial_data.post_conversion_usage_units;
 
         env.storage().instance().set(
@@ -7106,7 +7898,8 @@ impl PaymentContract {
     /// Anyone (typically an off-chain keeper / cron) may call this once the
     /// payment is due. It handles retry logic internally.
     pub fn execute_recurring_payment(env: Env, subscription_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         if !env
             .storage()
             .instance()
@@ -7436,6 +8229,7 @@ impl PaymentContract {
             billing_cap,
             last_reset_at: now,
             max_units_per_period,
+            accumulated_cost: 0,
         };
 
         env.storage().instance().set(
@@ -7588,7 +8382,8 @@ impl PaymentContract {
     /// - `MeteredNotFound` if the subscription does not exist.
     /// - `BillingOverflow` if the multiplication of units × price overflows.
     pub fn execute_metered_billing(env: Env, subscription_id: u64) -> Result<i128, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         let mut sub: MeteredSubscription = env
             .storage()
             .instance()
@@ -7604,10 +8399,18 @@ impl PaymentContract {
             return Ok(0);
         }
 
-        let mut amount = (units_billed as i128)
-            .checked_mul(sub.price_per_unit)
-            // .ok_or(Error::BillingOverflow)?;
-            .ok_or(Error::Payment(PaymentError::BillingOverflow))?;
+        // TOU subscriptions accrue cost per band at report time; flat-rate
+        // subscriptions keep the previous units * price calculation.
+        let has_tariff = env.storage().instance().has(&DataKey::Feature(
+            FeatureKey::SubscriptionTariff(subscription_id),
+        ));
+        let mut amount = if has_tariff {
+            sub.accumulated_cost
+        } else {
+            (units_billed as i128)
+                .checked_mul(sub.price_per_unit)
+                .ok_or(Error::Payment(PaymentError::BillingOverflow))?
+        };
 
         let mut cap_hit = false;
 
@@ -7623,6 +8426,7 @@ impl PaymentContract {
         token_client.transfer_from(&contract_address, &sub.customer, &sub.merchant, &amount);
 
         sub.accumulated_units = 0;
+        sub.accumulated_cost = 0;
         sub.last_reset_at = env.ledger().timestamp();
 
         env.storage().instance().set(
@@ -7804,7 +8608,8 @@ impl PaymentContract {
         customer: Address,
         subscription_id: u64,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         customer.require_auth();
 
         if !env
@@ -8054,7 +8859,8 @@ impl PaymentContract {
     /// Retry a failed payment for a subscription in dunning.
     /// Validates that the retry is due before attempting.
     pub fn retry_failed_payment(env: Env, subscription_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         if !env
             .storage()
             .instance()
@@ -8200,7 +9006,8 @@ impl PaymentContract {
 
     /// Admin resolves dunning for a subscription, returning it to active state.
     pub fn resolve_dunning(env: Env, admin: Address, subscription_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
 
         let config: MultiSigConfig = env
@@ -9223,11 +10030,11 @@ impl PaymentContract {
             return 0;
         }
 
-        let waived =
-            match PaymentContract::fee_waiver_eligibility(&env, &merchant, &customer, fee) {
-                Some((_, waived)) => waived,
-                None => 0,
-            };
+        let waived = match PaymentContract::fee_waiver_eligibility(&env, &merchant, &customer, fee)
+        {
+            Some((_, waived)) => waived,
+            None => 0,
+        };
         fee - waived
     }
 
@@ -9403,7 +10210,8 @@ impl PaymentContract {
 
     /// Admin withdraws accumulated fees to the treasury address.
     pub fn withdraw_fees(env: Env, admin: Address, amount: i128) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
         let multisig: MultiSigConfig = env
             .storage()
@@ -9426,6 +10234,28 @@ impl PaymentContract {
         if amount > accumulated {
             return Err(Error::Feature(FeatureError::InsufficientFees));
         }
+        let total_pending: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::TotalPendingSettlement(
+                fee_config.fee_token.clone(),
+            )))
+            .unwrap_or(0);
+        let prepaid_liability: i128 = storage::get_persistent(
+            &env,
+            &DataKey::Feature(FeatureKey::PrepaidLiability(fee_config.fee_token.clone())),
+        )
+        .unwrap_or(0);
+        let contract_balance = token::Client::new(&env, &fee_config.fee_token)
+            .balance(&env.current_contract_address());
+        let reserved = total_pending
+            .checked_add(prepaid_liability)
+            .ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        let available = contract_balance.checked_sub(reserved).unwrap_or(0);
+        if amount > available {
+            return Err(Error::Feature(FeatureError::InsufficientBalanceForSweep));
+        }
+
         let token_client = token::Client::new(&env, &fee_config.fee_token);
         token_client.transfer(
             &env.current_contract_address(),
@@ -9436,6 +10266,7 @@ impl PaymentContract {
             &DataKey::Payment(PaymentKey::AccumulatedFees),
             &(accumulated - amount),
         );
+        Self::decrease_token_liability(&env, &fee_config.fee_token, amount);
         (FeesWithdrawn {
             amount,
             treasury: fee_config.treasury.clone(),
@@ -9495,8 +10326,7 @@ impl PaymentContract {
         // per-address usage cap, validity window). The waiver state is persisted
         // here — before any external token transfer — so the counters cannot be
         // re-entered or double-spent by a token hook.
-        let waived =
-            PaymentContract::apply_fee_waiver(env, payment_id, &merchant, customer, fee);
+        let waived = PaymentContract::apply_fee_waiver(env, payment_id, &merchant, customer, fee);
         let fee = fee - waived;
 
         if fee <= 0 {
@@ -9521,6 +10351,7 @@ impl PaymentContract {
             &DataKey::Payment(PaymentKey::AccumulatedFees),
             &(accumulated + fee),
         );
+        Self::increase_token_liability(env, token, fee);
 
         if risk_surcharge_bps > 0 {
             (RiskFeeApplied {
@@ -9968,7 +10799,10 @@ impl PaymentContract {
         // Get waiver discount (only while the campaign still has budget left)
         let waiver = PaymentContract::get_fee_waiver(env.clone(), merchant);
         if let Some(w) = waiver {
-            if w.max_total_waived_fee.saturating_sub(w.accumulated_waived_fee) > 0 {
+            if w.max_total_waived_fee
+                .saturating_sub(w.accumulated_waived_fee)
+                > 0
+            {
                 let waiver_adjusted_bps =
                     tier_adjusted_bps - (tier_adjusted_bps * w.waiver_bps) / 10000;
                 waiver_adjusted_bps
@@ -10001,12 +10835,12 @@ impl PaymentContract {
             return None;
         }
 
-        let waiver: FeeWaiver = env
-            .storage()
-            .instance()
-            .get(&DataKey::Customer(CustomerDataKey::FeeWaiver(
-                merchant.clone(),
-            )))?;
+        let waiver: FeeWaiver =
+            env.storage()
+                .instance()
+                .get(&DataKey::Customer(CustomerDataKey::FeeWaiver(
+                    merchant.clone(),
+                )))?;
 
         let now = env.ledger().timestamp();
         if now < waiver.valid_from || now > waiver.valid_until {
@@ -10065,9 +10899,15 @@ impl PaymentContract {
                 Some(v) => v,
                 None => {
                     // Deactivate a campaign whose budget is already fully consumed.
-                    if let Some(w) = env.storage().instance().get::<DataKey, FeeWaiver>(&waiver_key)
+                    if let Some(w) = env
+                        .storage()
+                        .instance()
+                        .get::<DataKey, FeeWaiver>(&waiver_key)
                     {
-                        if w.max_total_waived_fee.saturating_sub(w.accumulated_waived_fee) <= 0 {
+                        if w.max_total_waived_fee
+                            .saturating_sub(w.accumulated_waived_fee)
+                            <= 0
+                        {
                             env.storage().instance().remove(&waiver_key);
                         }
                     }
@@ -10084,9 +10924,7 @@ impl PaymentContract {
         // Effects first: budget and per-address counters are persisted before the
         // caller performs any external token transfer (checks-effects-interactions).
         let mut updated = waiver.clone();
-        updated.accumulated_waived_fee = updated
-            .accumulated_waived_fee
-            .saturating_add(waived);
+        updated.accumulated_waived_fee = updated.accumulated_waived_fee.saturating_add(waived);
         env.storage().instance().set(&waiver_key, &updated);
         env.storage()
             .instance()
@@ -10172,7 +11010,8 @@ impl PaymentContract {
     /// - `RebateThresholdNotMet` if no accrual data exists for the merchant.
     /// - `RebateAlreadyClaimed` if the accrued rebate is zero (already claimed).
     pub fn claim_fee_rebate(env: Env, merchant: Address) -> Result<i128, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         merchant.require_auth();
 
         let config: FeeRebateConfig = env
@@ -10263,19 +11102,23 @@ impl PaymentContract {
                 period_volume: 0,
             });
 
-        // Reset period if elapsed
-        if now >= accrual.period_start + config.rebate_period_seconds {
+        if config.rebate_period_seconds > 0
+            && now.saturating_sub(accrual.period_start) >= config.rebate_period_seconds
+        {
             accrual.period_start = now;
             accrual.period_volume = 0;
             accrual.accrued_rebate = 0;
         }
 
-        accrual.period_volume += payment_amount;
-
-        // Only accrue rebate on volume above the threshold
-        if accrual.period_volume > config.threshold_volume && fee_amount > 0 {
-            let rebate = (fee_amount * (config.rebate_bps as i128)) / 10000;
-            accrual.accrued_rebate += rebate;
+        accrual.period_volume = accrual.period_volume.saturating_add(payment_amount);
+        if accrual.period_volume >= config.threshold_volume {
+            let rebate = fixed_math::mul_div_floor_or_panic(
+                env,
+                fee_amount,
+                config.rebate_bps as i128,
+                10000,
+            );
+            accrual.accrued_rebate = accrual.accrued_rebate.saturating_add(rebate);
         }
 
         env.storage().instance().set(
@@ -10284,7 +11127,201 @@ impl PaymentContract {
         );
     }
 
-    // ── BATCH PAYMENT OPERATIONS ──────────────────────────────────────────────
+    fn rebate_leaf_hash(
+        env: &Env,
+        pool_id: u64,
+        index: u32,
+        claimant: &Address,
+        amount: i128,
+    ) -> BytesN<32> {
+        let mut data = Bytes::new(env);
+        data.extend_from_slice(b"GRIDPAY_REBATE_V1");
+        data.append(&env.current_contract_address().to_xdr(env));
+        data.extend_from_array(&pool_id.to_be_bytes());
+        data.extend_from_array(&index.to_be_bytes());
+        data.append(&claimant.clone().to_xdr(env));
+        data.extend_from_array(&amount.to_be_bytes());
+        env.crypto().sha256(&data).into()
+    }
+
+    fn rebate_hash_pair(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+        let mut left = a.clone();
+        let mut right = b.clone();
+        if right.to_array() < left.to_array() {
+            core::mem::swap(&mut left, &mut right);
+        }
+        let mut data = Bytes::from_array(env, &[0x01u8]);
+        data.extend_from_array(&left.to_array());
+        data.extend_from_array(&right.to_array());
+        env.crypto().sha256(&data).into()
+    }
+
+    fn verify_rebate_merkle_proof(
+        env: &Env,
+        leaf: BytesN<32>,
+        proof: &Vec<BytesN<32>>,
+        root: &BytesN<32>,
+    ) -> bool {
+        let mut node = leaf;
+        for sibling in proof.iter() {
+            node = Self::rebate_hash_pair(env, &node, &sibling);
+        }
+        node == *root
+    }
+
+    fn rebate_bitmap_key(pool_id: u64, index: u32) -> DataKey {
+        DataKey::State(StateDataKey::RebateClaimedBitmap(pool_id, index / 128))
+    }
+
+    fn is_rebate_claimed(env: &Env, pool_id: u64, index: u32) -> bool {
+        let key = Self::rebate_bitmap_key(pool_id, index);
+        let word: u128 = storage::get_persistent(env, &key).unwrap_or(0);
+        let bit = 1u128 << (index % 128);
+        word & bit != 0
+    }
+
+    fn set_rebate_claimed(env: &Env, pool_id: u64, index: u32) {
+        let key = Self::rebate_bitmap_key(pool_id, index);
+        let mut word: u128 = storage::get_persistent(env, &key).unwrap_or(0);
+        let bit = 1u128 << (index % 128);
+        word |= bit;
+        storage::set_persistent(env, &key, &word);
+    }
+
+    pub fn create_rebate_pool(
+        env: Env,
+        sponsor: Address,
+        token: Address,
+        merkle_root: BytesN<32>,
+        total_funded: i128,
+        expires_at: u64,
+    ) -> Result<u64, Error> {
+        sponsor.require_auth();
+        if total_funded <= 0 {
+            return Err(Error::Payment(PaymentError::InvalidStatus));
+        }
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            return Err(Error::Payment(PaymentError::InvalidScheduleTime));
+        }
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&sponsor, &env.current_contract_address(), &total_funded);
+
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::State(StateDataKey::RebatePoolCounter))
+            .unwrap_or(0);
+        let pool_id = counter + 1;
+        let pool = RebatePool {
+            pool_id,
+            sponsor: sponsor.clone(),
+            token: token.clone(),
+            merkle_root,
+            total_funded,
+            total_claimed: 0,
+            expires_at,
+        };
+        storage::set_persistent(
+            &env,
+            &DataKey::State(StateDataKey::RebatePool(pool_id)),
+            &pool,
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::State(StateDataKey::RebatePoolCounter), &pool_id);
+
+        RebatePoolCreated {
+            pool_id,
+            sponsor,
+            token,
+            total_funded,
+            expires_at,
+        }
+        .publish(&env);
+        Ok(pool_id)
+    }
+
+    pub fn claim_rebate(
+        env: Env,
+        claimant: Address,
+        pool_id: u64,
+        index: u32,
+        amount: i128,
+        proof: Vec<BytesN<32>>,
+    ) -> Result<(), Error> {
+        claimant.require_auth();
+        if amount <= 0 {
+            return Err(Error::Payment(PaymentError::InvalidStatus));
+        }
+        let pool_key = DataKey::State(StateDataKey::RebatePool(pool_id));
+        let mut pool: RebatePool = storage::get_persistent(&env, &pool_key)
+            .ok_or(Error::Feature(FeatureError::RebatePoolNotFound))?;
+        let now = env.ledger().timestamp();
+        if now > pool.expires_at {
+            return Err(Error::Feature(FeatureError::RebatePoolNotExpired));
+        }
+        if Self::is_rebate_claimed(&env, pool_id, index) {
+            return Err(Error::Feature(FeatureError::RebateClaimed));
+        }
+        let leaf = Self::rebate_leaf_hash(&env, pool_id, index, &claimant, amount);
+        if !Self::verify_rebate_merkle_proof(&env, leaf, &proof, &pool.merkle_root) {
+            return Err(Error::Feature(FeatureError::InvalidRebateProof));
+        }
+        let next_claimed = pool.total_claimed.saturating_add(amount);
+        if next_claimed > pool.total_funded {
+            return Err(Error::Feature(FeatureError::RebatePoolInsufficientFunds));
+        }
+
+        Self::set_rebate_claimed(&env, pool_id, index);
+        pool.total_claimed = next_claimed;
+        storage::set_persistent(&env, &pool_key, &pool);
+        let token_client = token::Client::new(&env, &pool.token);
+        token_client.transfer(&env.current_contract_address(), &claimant, &amount);
+
+        RebateClaimed {
+            pool_id,
+            claimant,
+            index,
+            amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn reclaim_expired_rebate_pool(
+        env: Env,
+        sponsor: Address,
+        pool_id: u64,
+    ) -> Result<i128, Error> {
+        sponsor.require_auth();
+        let pool_key = DataKey::State(StateDataKey::RebatePool(pool_id));
+        let mut pool: RebatePool = storage::get_persistent(&env, &pool_key)
+            .ok_or(Error::Feature(FeatureError::RebatePoolNotFound))?;
+        if pool.sponsor != sponsor {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        let now = env.ledger().timestamp();
+        if now <= pool.expires_at {
+            return Err(Error::Feature(FeatureError::RebatePoolNotExpired));
+        }
+        let remaining = pool.total_funded.saturating_sub(pool.total_claimed);
+        if remaining <= 0 {
+            return Err(Error::Feature(FeatureError::RebatePoolInsufficientFunds));
+        }
+        pool.total_claimed = pool.total_funded;
+        storage::set_persistent(&env, &pool_key, &pool);
+        let token_client = token::Client::new(&env, &pool.token);
+        token_client.transfer(&env.current_contract_address(), &sponsor, &remaining);
+
+        RebatePoolReclaimed {
+            pool_id,
+            sponsor,
+            amount: remaining,
+        }
+        .publish(&env);
+        Ok(remaining)
+    }
 
     fn validate_batch_size(len: u32) -> Result<(), Error> {
         const MAX_BATCH_SIZE: u32 = 50;
@@ -10492,7 +11529,8 @@ impl PaymentContract {
         admin: Address,
         entries: Vec<BatchPaymentEntry>,
     ) -> Result<Vec<BatchResult>, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "create_payment_batch_optimized")?;
         admin.require_auth();
 
@@ -12936,7 +13974,8 @@ impl PaymentContract {
         expires_at: u64,
         customer_pk: BytesN<32>,
     ) -> Result<u64, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "open_channel")?;
         Self::require_merchant_not_paused(&env, &merchant)?;
         customer.require_auth();
@@ -13017,7 +14056,8 @@ impl PaymentContract {
         channel_id: u64,
         amount: i128,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "top_up_channel")?;
         customer.require_auth();
         if amount <= 0 {
@@ -13108,7 +14148,8 @@ impl PaymentContract {
         nonce: u64,
         signature: BytesN<64>,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "settle_channel")?;
 
         let mut channel: PaymentChannel = env
@@ -13208,7 +14249,8 @@ impl PaymentContract {
     /// Returns an error if the caller is not a channel participant, the channel
     /// is not found, already closed, or not yet expired.
     pub fn close_channel_expired(env: Env, caller: Address, channel_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_not_paused(&env, "close_channel_expired")?;
         caller.require_auth();
 
@@ -13268,6 +14310,274 @@ impl PaymentContract {
             .instance()
             .get(&DataKey::Feature(FeatureKey::PaymentChannel(channel_id)))
             .ok_or(Error::Feature(FeatureError::ChannelNotFound))
+    }
+
+    // ── PREPAID VAULTS ──────────────────────────────────────────────────────
+
+    fn get_prepaid_vault_internal(env: &Env, vault_id: u64) -> Result<PrepaidVault, Error> {
+        storage::get_prepaid_vault(env, &storage::PrepaidVaultKey::Vault(vault_id))
+            .ok_or(Error::Feature(FeatureError::PrepaidVaultNotFound))
+    }
+
+    fn save_prepaid_vault_internal(env: &Env, vault: &PrepaidVault) {
+        storage::set_prepaid_vault(env, &storage::PrepaidVaultKey::Vault(vault.vault_id), vault);
+    }
+
+    /// Deposits funds into a prepaid vault for a beneficiary.
+    pub fn deposit_prepaid_vault(
+        env: Env,
+        funder: Address,
+        beneficiary: Address,
+        merchant_opt: Option<Address>,
+        token: Address,
+        amount: i128,
+        expires_at: Option<u64>,
+        transferable: bool,
+    ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "deposit_prepaid_vault")?;
+        funder.require_auth();
+        if amount <= 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+        if let Some(ref merchant) = merchant_opt {
+            Self::require_merchant_not_paused(&env, merchant)?;
+            if Self::is_zero_address(&env, merchant) {
+                return Err(Error::Feature(FeatureError::InvalidCounterparty));
+            }
+        }
+        if let Some(exp) = expires_at {
+            if exp <= env.ledger().timestamp() {
+                return Err(Error::Feature(FeatureError::PrepaidVaultExpired));
+            }
+        }
+
+        token::Client::new(&env, &token).transfer(
+            &funder,
+            &env.current_contract_address(),
+            &amount,
+        );
+
+        let counter: u64 =
+            storage::get_prepaid_vault(&env, &storage::PrepaidVaultKey::Counter).unwrap_or(0);
+        let vault_id = counter + 1;
+        let vault = PrepaidVault {
+            vault_id,
+            owner: beneficiary.clone(),
+            merchant: merchant_opt,
+            token: token.clone(),
+            balance: amount,
+            expires_at,
+            transferable,
+        };
+        Self::save_prepaid_vault_internal(&env, &vault);
+        storage::set_prepaid_vault(&env, &storage::PrepaidVaultKey::Counter, &vault_id);
+        let liab_key = DataKey::Feature(FeatureKey::PrepaidLiability(token.clone()));
+        let liab: i128 = storage::get_persistent(&env, &liab_key).unwrap_or(0);
+        storage::set_persistent(
+            &env,
+            &liab_key,
+            &liab
+                .checked_add(amount)
+                .ok_or(Error::Basic(BasicError::InvalidAmount))?,
+        );
+
+        (PrepaidVaultDeposited {
+            vault_id,
+            funder,
+            beneficiary,
+            token,
+            amount,
+        })
+        .publish(&env);
+        Ok(vault_id)
+    }
+
+    /// Pays a merchant from a prepaid vault.
+    ///
+    /// `payment_id_or_merchant` is treated as a merchant when it resolves to a vault
+    /// merchant restriction or when no payment id is found in storage.
+    pub fn pay_from_prepaid_vault(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        payment_id_or_merchant: Address,
+        amount: i128,
+    ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "pay_from_prepaid_vault")?;
+        owner.require_auth();
+        if amount <= 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+
+        let mut vault = Self::get_prepaid_vault_internal(&env, vault_id)?;
+        if vault.owner != owner {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        if let Some(exp) = vault.expires_at {
+            if env.ledger().timestamp() > exp {
+                return Err(Error::Feature(FeatureError::PrepaidVaultExpired));
+            }
+        }
+        if amount > vault.balance {
+            return Err(Error::Feature(
+                FeatureError::PrepaidVaultInsufficientBalance,
+            ));
+        }
+
+        let merchant = if let Some(ref m) = vault.merchant {
+            if *m != payment_id_or_merchant {
+                // Allow passing payment-related merchant only when it matches restriction.
+                // If a payment id is passed mistakenly as address, restriction still protects.
+                return Err(Error::Feature(FeatureError::PrepaidVaultMerchantMismatch));
+            }
+            m.clone()
+        } else {
+            // Open-loop vault: treat as merchant target directly.
+            payment_id_or_merchant.clone()
+        };
+        Self::require_merchant_not_paused(&env, &merchant)?;
+        if Self::is_zero_address(&env, &merchant) {
+            return Err(Error::Feature(FeatureError::InvalidCounterparty));
+        }
+
+        let new_balance = vault
+            .balance
+            .checked_sub(amount)
+            .ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        token::Client::new(&env, &vault.token).transfer(
+            &env.current_contract_address(),
+            &merchant,
+            &amount,
+        );
+        vault.balance = new_balance;
+        Self::save_prepaid_vault_internal(&env, &vault);
+        let liab_key = DataKey::Feature(FeatureKey::PrepaidLiability(vault.token.clone()));
+        let liab: i128 = storage::get_persistent(&env, &liab_key).unwrap_or(0);
+        storage::set_persistent(
+            &env,
+            &liab_key,
+            &liab
+                .checked_sub(amount)
+                .ok_or(Error::Basic(BasicError::InvalidAmount))?,
+        );
+
+        (PrepaidVaultSpent {
+            vault_id,
+            owner,
+            merchant,
+            amount,
+        })
+        .publish(&env);
+        Ok(vault_id)
+    }
+
+    /// Withdraws unused funds from an open-loop or expired vault.
+    pub fn withdraw_unused_prepaid(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        amount: i128,
+    ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "withdraw_unused_prepaid")?;
+        owner.require_auth();
+        if amount <= 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+
+        let mut vault = Self::get_prepaid_vault_internal(&env, vault_id)?;
+        if vault.owner != owner {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        if amount > vault.balance {
+            return Err(Error::Feature(
+                FeatureError::PrepaidVaultInsufficientBalance,
+            ));
+        }
+        let expired = vault
+            .expires_at
+            .map(|e| env.ledger().timestamp() > e)
+            .unwrap_or(false);
+        if vault.merchant.is_some() && !expired {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+
+        let new_balance = vault
+            .balance
+            .checked_sub(amount)
+            .ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        token::Client::new(&env, &vault.token).transfer(
+            &env.current_contract_address(),
+            &owner,
+            &amount,
+        );
+        vault.balance = new_balance;
+        Self::save_prepaid_vault_internal(&env, &vault);
+        let liab_key = DataKey::Feature(FeatureKey::PrepaidLiability(vault.token.clone()));
+        let liab: i128 = storage::get_persistent(&env, &liab_key).unwrap_or(0);
+        storage::set_persistent(
+            &env,
+            &liab_key,
+            &liab
+                .checked_sub(amount)
+                .ok_or(Error::Basic(BasicError::InvalidAmount))?,
+        );
+
+        (PrepaidVaultWithdrawn {
+            vault_id,
+            owner,
+            amount,
+        })
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Transfers a transferable prepaid vault to a new owner.
+    pub fn transfer_prepaid_vault(
+        env: Env,
+        owner: Address,
+        vault_id: u64,
+        new_owner: Address,
+    ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "transfer_prepaid_vault")?;
+        owner.require_auth();
+
+        let mut vault = Self::get_prepaid_vault_internal(&env, vault_id)?;
+        if vault.owner != owner {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        if !vault.transferable || vault.balance == 0 {
+            return Err(Error::Feature(FeatureError::PrepaidVaultNotTransferable));
+        }
+        if let Some(exp) = vault.expires_at {
+            if env.ledger().timestamp() > exp {
+                return Err(Error::Feature(FeatureError::PrepaidVaultExpired));
+            }
+        }
+
+        vault.owner = new_owner.clone();
+        Self::save_prepaid_vault_internal(&env, &vault);
+
+        (PrepaidVaultTransferred {
+            vault_id,
+            from: owner,
+            to: new_owner,
+        })
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Returns a prepaid vault by id.
+    pub fn get_prepaid_vault(env: Env, vault_id: u64) -> Result<PrepaidVault, Error> {
+        storage::bump_prepaid_vault(&env, &storage::PrepaidVaultKey::Vault(vault_id));
+        Self::get_prepaid_vault_internal(&env, vault_id)
     }
 
     /// Opens a time-streaming channel funded by the customer.
@@ -13498,7 +14808,8 @@ impl PaymentContract {
         token: Address,
         recipients: Vec<SplitRecipient>,
     ) -> Result<u64, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         Self::require_merchant_not_paused(&env, &merchant)?;
         customer.require_auth();
 
@@ -13799,7 +15110,8 @@ impl PaymentContract {
         admin: Address,
         payment_id: u64,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
 
         let mut config: PaymentSplitConfig = env
@@ -13963,7 +15275,8 @@ impl PaymentContract {
     /// is not set, accumulated fees are empty, `sweep_amount` exceeds accumulated fees,
     /// or multisig approval is required for amounts above threshold.
     pub fn sweep_fees(env: Env, admin: Address, sweep_amount: i128) -> Result<i128, Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         admin.require_auth();
         let config: MultiSigConfig = env
             .storage()
@@ -14006,7 +15319,29 @@ impl PaymentContract {
             .get(&DataKey::Config(ConfigKey::FeeConfig))
             .ok_or(Error::Feature(FeatureError::FeeConfigNotFound))?;
 
-        // Security check: Ensure sweep won't encroach on merchant pending settlements
+        // Security check: Ensure sweep won't encroach on merchant pending settlements or prepaid liabilities
+        let total_pending: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Payment(PaymentKey::TotalPendingSettlement(
+                fee_config.fee_token.clone(),
+            )))
+            .unwrap_or(0);
+        let prepaid_liability: i128 = storage::get_persistent(
+            &env,
+            &DataKey::Feature(FeatureKey::PrepaidLiability(fee_config.fee_token.clone())),
+        )
+        .unwrap_or(0);
+        let contract_balance = token::Client::new(&env, &fee_config.fee_token)
+            .balance(&env.current_contract_address());
+        let reserved = total_pending
+            .checked_add(prepaid_liability)
+            .ok_or(Error::Basic(BasicError::InvalidAmount))?;
+        let available = contract_balance.checked_sub(reserved).unwrap_or(0);
+        if sweep_amount > available {
+            return Err(Error::Feature(FeatureError::InsufficientBalanceForSweep));
+        }
+
         let token_client = token::Client::new(&env, &fee_config.fee_token);
         token_client.transfer(&env.current_contract_address(), &recipient, &sweep_amount);
         let remaining = accumulated - sweep_amount;
@@ -14566,7 +15901,8 @@ impl PaymentContract {
     /// Returns an error if the settlement is already finalized, not found,
     /// or the release time has not yet passed.
     pub fn finalize_pending_settlement(env: Env, payment_id: u64) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         if finality::is_flagged(&env, payment_id) {
             return Err(Error::Payment(PaymentError::PaymentFlagged));
         }
@@ -14796,7 +16132,8 @@ impl PaymentContract {
         route: RouteOption,
         payment_id: u64,
     ) -> Result<(), Error> {
-        let _entry = reentrancy::ExternalEntry::acquire(&env).map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
         customer.require_auth();
 
         // Validate route is still valid at execution time
@@ -15117,7 +16454,8 @@ impl PaymentContract {
         let mut at_pos: Option<u32> = None;
         let mut i: u32 = 0;
         while i < len {
-            if bytes.get(i).unwrap_or(0) == 64u8 { // '@'
+            if bytes.get(i).unwrap_or(0) == 64u8 {
+                // '@'
                 at_pos = Some(i);
                 break;
             }
@@ -15135,7 +16473,8 @@ impl PaymentContract {
         let mut k: u32 = 0;
         while k < len {
             let b = bytes.get(k).unwrap_or(0);
-            if b >= 48u8 && b <= 57u8 { // '0'..'9'
+            if b >= 48u8 && b <= 57u8 {
+                // '0'..'9'
                 digit_run += 1;
                 if digit_run >= 9 {
                     return Err(Error::Basic(BasicError::PiiDetected));
@@ -15145,7 +16484,8 @@ impl PaymentContract {
                 || b == 46u8     // '.'
                 || b == 40u8     // '('
                 || b == 41u8     // ')'
-                || b == 43u8     // '+'
+                || b == 43u8
+            // '+'
             {
                 // Separator — keep the digit run going if we already have digits.
                 // (Allows separators within phone numbers)
@@ -15156,6 +16496,775 @@ impl PaymentContract {
         }
 
         Ok(())
+    }
+
+    // ── Pre-Authorization Hold & Partial Capture (#426) ─────────────────────────
+
+    /// Creates a pre-authorization hold that locks `max_amount` of the
+    /// customer's tokens inside the contract until the merchant captures part
+    /// or all of it, the hold is voided, or it expires (#426).
+    ///
+    /// The customer must authorize. The token must be whitelisted and the
+    /// merchant must not be paused. The full `max_amount` is pulled from the
+    /// customer into the contract via `transfer_from`.
+    ///
+    /// # Arguments
+    /// * `customer` - The customer whose tokens are locked (must authorize).
+    /// * `merchant` - The merchant who may later capture from the hold.
+    /// * `token` - The token address to lock.
+    /// * `max_amount` - The maximum amount to reserve (must be > 0).
+    /// * `expires_at` - Ledger timestamp after which anyone may reclaim the hold.
+    /// * `metadata` - Arbitrary reference string (max 512 bytes).
+    ///
+    /// # Returns
+    /// `Ok(auth_id)` on success, or an error if the token is not allowed, the
+    /// amount is invalid, the metadata is too large, the customer is flagged,
+    /// spend or tier limits are exceeded, or the contract is paused.
+    pub fn authorize_payment(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        token: Address,
+        max_amount: i128,
+        expires_at: u64,
+        metadata: String,
+    ) -> Result<u64, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "authorize_payment")?;
+        Self::require_merchant_not_paused(&env, &merchant)?;
+        customer.require_auth();
+
+        if max_amount <= 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+        if !PaymentContract::is_token_allowed(&env, &token) {
+            return Err(Error::Payment(PaymentError::TokenNotAllowed));
+        }
+        if metadata.len() > MAX_METADATA_SIZE {
+            return Err(Error::Basic(BasicError::MetadataTooLarge));
+        }
+        let now = env.ledger().timestamp();
+        if expires_at <= now {
+            return Err(Error::Payment(PaymentError::InvalidScheduleTime));
+        }
+
+        // Enforce sanctions/flag checks.
+        if PaymentContract::is_address_flagged(env.clone(), customer.clone())
+            && !PaymentContract::is_allowlisted(&env, &customer)
+        {
+            return Err(Error::Basic(BasicError::AddressFlagged));
+        }
+
+        // Check customer spend limit and merchant tier volume.
+        PaymentContract::check_and_update_spend_limit(&env, &customer, max_amount)?;
+        PaymentContract::check_and_update_daily_tier_volume(&env, &merchant, max_amount)?;
+
+        // ── Effects: create the hold record before the external transfer ──
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::State(StateDataKey::PreAuthCounter))
+            .unwrap_or(0);
+        let auth_id = counter + 1;
+
+        let preauth = PreAuthPayment {
+            auth_id,
+            customer: customer.clone(),
+            merchant: merchant.clone(),
+            token: token.clone(),
+            max_amount,
+            captured_amount: 0,
+            fee_amount: 0,
+            expires_at,
+            created_at: now,
+            status: PreAuthStatus::Authorized,
+            metadata: metadata.clone(),
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::State(StateDataKey::PreAuth(auth_id)), &preauth);
+        env.storage()
+            .instance()
+            .set(&DataKey::State(StateDataKey::PreAuthCounter), &auth_id);
+
+        // ── Interaction: lock max_amount from customer into the contract ──
+        let token_client = token::Client::new(&env, &token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer_from(&contract_address, &customer, &contract_address, &max_amount);
+
+        (PreAuthCreated {
+            auth_id,
+            customer,
+            merchant,
+            token,
+            max_amount,
+            expires_at,
+        })
+        .publish(&env);
+
+        Ok(auth_id)
+    }
+
+    /// Captures `capture_amount` from a pre-authorization hold, crediting the
+    /// merchant net of the protocol fee and atomically refunding the unused
+    /// remainder (`max_amount - capture_amount`) to the customer (#426).
+    ///
+    /// The fee is calculated on `capture_amount` only, never `max_amount`.
+    /// The hold must be in `Authorized` status and the current time must not
+    /// exceed `expires_at`.
+    ///
+    /// # Arguments
+    /// * `merchant` - The merchant authorised on the hold (must authorize).
+    /// * `auth_id` - The pre-authorization ID returned by `authorize_payment`.
+    /// * `capture_amount` - The amount to capture (`0 < capture_amount <= max_amount`).
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error if the hold is not found, already
+    /// captured/voided, expired, the capture amount is invalid, or the caller
+    /// is not the authorised merchant.
+    pub fn capture_payment(
+        env: Env,
+        merchant: Address,
+        auth_id: u64,
+        capture_amount: i128,
+    ) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "capture_payment")?;
+        merchant.require_auth();
+
+        if capture_amount <= 0 {
+            return Err(Error::Payment(PaymentError::InvalidCaptureAmount));
+        }
+
+        // ── Checks ──
+        let mut preauth: PreAuthPayment = env
+            .storage()
+            .instance()
+            .get(&DataKey::State(StateDataKey::PreAuth(auth_id)))
+            .ok_or(Error::Payment(PaymentError::PreAuthNotFound))?;
+
+        if preauth.merchant != merchant {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        if preauth.status != PreAuthStatus::Authorized {
+            return Err(Error::Payment(PaymentError::InvalidStatus));
+        }
+        if capture_amount > preauth.max_amount {
+            return Err(Error::Payment(PaymentError::CaptureExceedsMax));
+        }
+        let now = env.ledger().timestamp();
+        if now > preauth.expires_at {
+            return Err(Error::Payment(PaymentError::PreAuthExpired));
+        }
+
+        // Fee is computed on capture_amount only, never max_amount.
+        let fee = PaymentContract::calculate_fee(
+            env.clone(),
+            capture_amount,
+            preauth.merchant.clone(),
+            preauth.customer.clone(),
+            Currency::USDC,
+        );
+        let merchant_net = capture_amount.saturating_sub(fee);
+        let refund = preauth.max_amount.saturating_sub(capture_amount);
+
+        // ── Effects: update hold state and accumulated fees before transfers ──
+        preauth.captured_amount = capture_amount;
+        preauth.fee_amount = fee;
+        preauth.status = PreAuthStatus::Captured;
+        env.storage()
+            .instance()
+            .set(&DataKey::State(StateDataKey::PreAuth(auth_id)), &preauth);
+
+        if fee > 0 {
+            let accumulated: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Payment(PaymentKey::AccumulatedFees))
+                .unwrap_or(0);
+            env.storage().instance().set(
+                &DataKey::Payment(PaymentKey::AccumulatedFees),
+                &(accumulated + fee),
+            );
+            PaymentContract::update_merchant_fee_record_post_completion(
+                &env,
+                preauth.merchant.clone(),
+                capture_amount,
+                fee,
+            );
+            (FeeCollected {
+                payment_id: auth_id,
+                fee_amount: fee,
+                merchant: preauth.merchant.clone(),
+            })
+            .publish(&env);
+        }
+
+        // ── Interactions: pay merchant and refund customer ──
+        let token_client = token::Client::new(&env, &preauth.token);
+        let contract_address = env.current_contract_address();
+        if merchant_net > 0 {
+            token_client.transfer(&contract_address, &preauth.merchant, &merchant_net);
+        }
+        if refund > 0 {
+            token_client.transfer(&contract_address, &preauth.customer, &refund);
+        }
+
+        (PreAuthCaptured {
+            auth_id,
+            merchant: preauth.merchant.clone(),
+            capture_amount,
+            fee_amount: fee,
+            refund_amount: refund,
+        })
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Voids a pre-authorization hold, returning the full locked `max_amount`
+    /// to the customer (#426).
+    ///
+    /// The merchant may void at any time while the hold is `Authorized`.
+    /// After `expires_at`, anyone (including the customer) may release the
+    /// expired hold.
+    ///
+    /// # Arguments
+    /// * `caller` - The caller voiding the hold (must authorize).
+    /// * `auth_id` - The pre-authorization ID to void.
+    ///
+    /// # Returns
+    /// `Ok(())` on success, or an error if the hold is not found, already
+    /// captured/voided, or the caller is not authorized.
+    pub fn void_authorization(env: Env, caller: Address, auth_id: u64) -> Result<(), Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "void_authorization")?;
+        caller.require_auth();
+
+        // ── Checks ──
+        let mut preauth: PreAuthPayment = env
+            .storage()
+            .instance()
+            .get(&DataKey::State(StateDataKey::PreAuth(auth_id)))
+            .ok_or(Error::Payment(PaymentError::PreAuthNotFound))?;
+
+        if preauth.status != PreAuthStatus::Authorized {
+            return Err(Error::Payment(PaymentError::InvalidStatus));
+        }
+
+        let now = env.ledger().timestamp();
+        let is_expired = now > preauth.expires_at;
+
+        // Authorization rules (#426):
+        //  - Merchant may void immediately (before expiry).
+        //  - Anyone may release the hold once it has expired.
+        if !is_expired {
+            if caller != preauth.merchant {
+                return Err(Error::Basic(BasicError::Unauthorized));
+            }
+        }
+
+        // ── Effects: mark as voided/expired before the transfer ──
+        preauth.status = if is_expired {
+            PreAuthStatus::Expired
+        } else {
+            PreAuthStatus::Voided
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::State(StateDataKey::PreAuth(auth_id)), &preauth);
+
+        // ── Interaction: refund the full max_amount to the customer ──
+        let token_client = token::Client::new(&env, &preauth.token);
+        let contract_address = env.current_contract_address();
+        token_client.transfer(&contract_address, &preauth.customer, &preauth.max_amount);
+
+        (PreAuthVoided {
+            auth_id,
+            voided_by: caller,
+            refund_amount: preauth.max_amount,
+        })
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Retrieves the details of a pre-authorization hold (#426).
+    ///
+    /// # Arguments
+    /// * `auth_id` - The pre-authorization ID to look up.
+    ///
+    /// # Returns
+    /// `Some(PreAuthPayment)` if the hold exists, or `None` otherwise.
+    pub fn get_preauth(env: Env, auth_id: u64) -> Option<PreAuthPayment> {
+        env.storage()
+            .instance()
+            .get(&DataKey::State(StateDataKey::PreAuth(auth_id)))
+    // ------------------------------------------------------------------------
+    // Issue #428 — storefront virtual sub-ledgers
+    // ------------------------------------------------------------------------
+
+    fn storefront_config_key(merchant: &Address, storefront_id: &Symbol) -> DataKey {
+        DataKey::StorefrontConfig(merchant.clone(), storefront_id.clone())
+    }
+
+    fn storefront_balance_key(
+        merchant: &Address,
+        storefront_id: &Symbol,
+        token: &Address,
+    ) -> DataKey {
+        DataKey::StorefrontBalance(merchant.clone(), storefront_id.clone(), token.clone())
+    }
+
+    fn load_storefront_config(
+        env: &Env,
+        merchant: &Address,
+        storefront_id: &Symbol,
+    ) -> Result<StorefrontConfig, Error> {
+        let config = storage::get_storefront_config(
+            env,
+            &Self::storefront_config_key(merchant, storefront_id),
+        )
+        .ok_or(Error::Storefront(StorefrontError::NotFound))?;
+        if config.parent_merchant != *merchant {
+            return Err(Error::Storefront(StorefrontError::NotFound));
+        }
+        Ok(config)
+    }
+
+    /// Registers a virtual storefront under an already verified parent merchant.
+    /// Each storefront is a dedicated persistent entry; the per-merchant cap is
+    /// bounded by `MAX_STOREFRONTS_PER_MERCHANT` to protect instance storage.
+    pub fn register_storefront(
+        env: Env,
+        merchant: Address,
+        storefront_id: Symbol,
+        payout_destination: Address,
+    ) -> Result<(), Error> {
+        Self::require_not_paused(&env, "register_storefront")?;
+        merchant.require_auth();
+
+        let count_key = DataKey::Merchant(MerchantDataKey::StorefrontCount(merchant.clone()));
+        let count: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        if count >= MAX_STOREFRONTS_PER_MERCHANT {
+            return Err(Error::Storefront(StorefrontError::LimitExceeded));
+        }
+
+        let config_key = Self::storefront_config_key(&merchant, &storefront_id);
+        if storage::get_storefront_config(&env, &config_key).is_some() {
+            return Err(Error::Storefront(StorefrontError::AlreadyExists));
+        }
+
+        storage::set_storefront_config(
+            &env,
+            &config_key,
+            &StorefrontConfig {
+                storefront_id: storefront_id.clone(),
+                parent_merchant: merchant.clone(),
+                payout_destination,
+                active: true,
+            },
+        );
+        env.storage().instance().set(&count_key, &(count + 1));
+        Ok(())
+    }
+
+    /// Blocks new incoming storefront payments while leaving the balance
+    /// sweepable by the parent merchant.
+    pub fn deactivate_storefront(
+        env: Env,
+        merchant: Address,
+        storefront_id: Symbol,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        let config_key = Self::storefront_config_key(&merchant, &storefront_id);
+        let mut config = Self::load_storefront_config(&env, &merchant, &storefront_id)?;
+        config.active = false;
+        storage::set_storefront_config(&env, &config_key, &config);
+        Ok(())
+    }
+
+    /// Updates the address that receives swept storefront funds.
+    pub fn set_storefront_destination(
+        env: Env,
+        merchant: Address,
+        storefront_id: Symbol,
+        payout_destination: Address,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        let config_key = Self::storefront_config_key(&merchant, &storefront_id);
+        let mut config = Self::load_storefront_config(&env, &merchant, &storefront_id)?;
+        config.payout_destination = payout_destination;
+        storage::set_storefront_config(&env, &config_key, &config);
+        Ok(())
+    }
+
+    pub fn get_storefront_config(
+        env: Env,
+        merchant: Address,
+        storefront_id: Symbol,
+    ) -> Option<StorefrontConfig> {
+        storage::get_storefront_config(&env, &Self::storefront_config_key(&merchant, &storefront_id))
+    }
+
+    /// Returns the isolated balance for (merchant, storefront_id, token).
+    pub fn get_storefront_balance(
+        env: Env,
+        merchant: Address,
+        storefront_id: Symbol,
+        token: Address,
+    ) -> i128 {
+        storage::get_storefront_balance(
+            &env,
+            &Self::storefront_balance_key(&merchant, &storefront_id, &token),
+        )
+    }
+
+    /// Creates a payment whose settlement is credited to a storefront sub-ledger.
+    /// Compliance checks still run against the parent merchant, so multiple
+    /// storefronts cannot bypass the shared verification-tier daily volume cap.
+    pub fn create_storefront_payment(
+        env: Env,
+        customer: Address,
+        merchant: Address,
+        storefront_id: Symbol,
+        amount: i128,
+        token: Address,
+        currency: Currency,
+        expiration_duration: u64,
+        metadata: String,
+    ) -> Result<u64, Error> {
+        Self::require_not_paused(&env, "create_storefront_payment")?;
+        customer.require_auth();
+
+        let config = Self::load_storefront_config(&env, &merchant, &storefront_id)?;
+        if !config.active {
+            return Err(Error::Storefront(StorefrontError::Inactive));
+        }
+        if amount <= 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+
+        let payment_id = Self::do_create_payment(
+            &env,
+            customer,
+            merchant.clone(),
+            amount,
+            token,
+            currency,
+            expiration_duration,
+            metadata,
+        )?;
+
+        env.storage().instance().set(
+            &DataKey::Merchant(MerchantDataKey::StorefrontPayment(payment_id)),
+            &StorefrontPaymentRoute {
+                parent_merchant: merchant.clone(),
+                storefront_id: storefront_id.clone(),
+            },
+        );
+        (StorefrontPaymentCreated {
+            payment_id,
+            merchant,
+            storefront_id,
+            amount,
+        })
+        .publish(&env);
+        Ok(payment_id)
+    }
+
+    /// Sweeps part or all of a storefront balance to its configured payout
+    /// destination. Works for deactivated storefronts and requires parent auth.
+    pub fn sweep_storefront_balance(
+        env: Env,
+        merchant: Address,
+        storefront_id: Symbol,
+        token: Address,
+        amount: i128,
+    ) -> Result<i128, Error> {
+        let _entry = reentrancy::ExternalEntry::acquire(&env)
+            .map_err(|_| Error::Basic(BasicError::ReentrantCallDetected))?;
+        Self::require_not_paused(&env, "sweep_storefront_balance")?;
+        merchant.require_auth();
+
+        let config = Self::load_storefront_config(&env, &merchant, &storefront_id)?;
+        if amount <= 0 {
+            return Err(Error::Storefront(StorefrontError::InvalidAmount));
+        }
+        let balance_key = Self::storefront_balance_key(&merchant, &storefront_id, &token);
+        let balance = storage::get_storefront_balance(&env, &balance_key);
+        if balance < amount {
+            return Err(Error::Storefront(
+                StorefrontError::InsufficientBalance,
+            ));
+        }
+
+        // Effect before interaction: zero/debit the ledger entry first.
+        let remaining = balance - amount;
+        storage::set_storefront_balance(&env, &balance_key, remaining);
+        Self::decrease_token_liability(&env, &token, amount);
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &config.payout_destination,
+            &amount,
+        );
+        (StorefrontBalanceSwept {
+            merchant,
+            storefront_id,
+            token,
+            amount,
+        })
+        .publish(&env);
+        Ok(remaining)
+    }
+
+    // ------------------------------------------------------------------------
+    // Issue #427 — time-of-use tariff schedules
+    // ------------------------------------------------------------------------
+
+    /// A schedule is valid iff its bands are non-empty, bounded, disjoint, and
+    /// collectively cover exactly [0, 1440) minutes of UTC time.
+    fn validate_tariff_bands(bands: &Vec<TariffBand>) -> Result<(), Error> {
+        let len = bands.len();
+        if len == 0 || len > MAX_TARIFF_BANDS {
+            return Err(Error::Tariff(TariffError::InvalidSchedule));
+        }
+        let mut covered: u32 = 0;
+        for i in 0..len {
+            let band = bands.get_unchecked(i);
+            if band.start_minute_utc >= band.end_minute_utc
+                || band.end_minute_utc > MINUTES_PER_DAY
+                || band.rate_per_unit < 0
+                || band.weekend_discount_bps > 10_000
+            {
+                return Err(Error::Tariff(TariffError::InvalidSchedule));
+            }
+            covered += (band.end_minute_utc - band.start_minute_utc) as u32;
+            for j in (i + 1)..len {
+                let other = bands.get_unchecked(j);
+                if band.start_minute_utc < other.end_minute_utc
+                    && other.start_minute_utc < band.end_minute_utc
+                {
+                    return Err(Error::Tariff(TariffError::InvalidSchedule));
+                }
+            }
+        }
+        if covered != MINUTES_PER_DAY as u32 {
+            return Err(Error::Tariff(TariffError::InvalidSchedule));
+        }
+        Ok(())
+    }
+
+    /// Creates an immutable tariff schedule. Updates are represented by new
+    /// schedule IDs, never by editing a schedule with reported usage.
+    pub fn create_tariff_schedule(
+        env: Env,
+        merchant: Address,
+        bands: Vec<TariffBand>,
+        effective_from: u64,
+    ) -> Result<u64, Error> {
+        Self::require_not_paused(&env, "create_tariff_schedule")?;
+        merchant.require_auth();
+        Self::validate_tariff_bands(&bands)?;
+
+        let counter_key = DataKey::Feature(FeatureKey::TariffScheduleCounter);
+        let schedule_id: u64 = env.storage().instance().get(&counter_key).unwrap_or(0) + 1;
+        let schedule = TariffSchedule {
+            schedule_id,
+            bands,
+            effective_from,
+            active: true,
+        };
+        storage::set_tariff_schedule(
+            &env,
+            &DataKey::Feature(FeatureKey::TariffSchedule(schedule_id)),
+            &schedule,
+        );
+        env.storage().instance().set(&counter_key, &schedule_id);
+        (TariffScheduleCreated {
+            schedule_id,
+            merchant,
+        })
+        .publish(&env);
+        Ok(schedule_id)
+    }
+
+    pub fn get_tariff_schedule(env: Env, schedule_id: u64) -> Option<TariffSchedule> {
+        storage::get_tariff_schedule(
+            &env,
+            &DataKey::Feature(FeatureKey::TariffSchedule(schedule_id)),
+        )
+    }
+
+    pub fn get_subscription_tariff(env: Env, subscription_id: u64) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Feature(FeatureKey::SubscriptionTariff(
+                subscription_id,
+            )))
+    }
+
+    /// Attaches a schedule to a metered subscription. Only allowed before any
+    /// usage is reported in the current cycle, so tariffs never reprice the past.
+    pub fn attach_tariff_to_subscription(
+        env: Env,
+        merchant: Address,
+        subscription_id: u64,
+        schedule_id: u64,
+    ) -> Result<(), Error> {
+        merchant.require_auth();
+        let mut sub: MeteredSubscription = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(SubscriptionKey::Metered(
+                subscription_id,
+            )))
+            .ok_or(Error::Subscription(SubscriptionError::MeteredNotFound))?;
+        if sub.merchant != merchant {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+        let schedule = storage::get_tariff_schedule(
+            &env,
+            &DataKey::Feature(FeatureKey::TariffSchedule(schedule_id)),
+        )
+        .ok_or(Error::Tariff(TariffError::ScheduleNotFound))?;
+        if !schedule.active || sub.accumulated_units > 0 {
+            return Err(Error::Tariff(TariffError::NotAttachable));
+        }
+        env.storage().instance().set(
+            &DataKey::Feature(FeatureKey::SubscriptionTariff(subscription_id)),
+            &schedule_id,
+        );
+        sub.accumulated_cost = 0;
+        env.storage().instance().set(
+            &DataKey::Subscription(SubscriptionKey::Metered(subscription_id)),
+            &sub,
+        );
+        (TariffAttached {
+            subscription_id,
+            schedule_id,
+        })
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Prices `units` consumed at `consumed_at` (UTC unix seconds) against the
+    /// matching ToU band, using U256 intermediates for the discount math.
+    fn tou_cost(
+        env: &Env,
+        band: &TariffBand,
+        units: u64,
+        consumed_at: u64,
+    ) -> Result<i128, Error> {
+        let day_of_week = (consumed_at / SECONDS_PER_DAY + 4) % 7; // 0 = Sunday
+        let is_weekend = day_of_week == 0 || day_of_week == 6;
+        let bps = if is_weekend {
+            10_000u32 - band.weekend_discount_bps
+        } else {
+            10_000u32
+        };
+        let product = U256::from_u128(env, units as u128)
+            .mul(&U256::from_u128(env, band.rate_per_unit as u128))
+            .mul(&U256::from_u32(env, bps));
+        let scaled = product
+            .div(&U256::from_u32(env, 10_000))
+            .to_u128()
+            .ok_or(Error::Payment(PaymentError::BillingOverflow))?;
+        i128::try_from(scaled).map_err(|_| Error::Payment(PaymentError::BillingOverflow))
+    }
+
+    /// Reports kWh deltas with the meter timestamp window used for band lookup.
+    /// Hard billing caps are enforced at report time and again at billing time.
+    pub fn report_tou_usage(
+        env: Env,
+        merchant: Address,
+        subscription_id: u64,
+        units: u64,
+        consumed_at: u64,
+    ) -> Result<i128, Error> {
+        merchant.require_auth();
+        if units == 0 {
+            return Err(Error::Basic(BasicError::InvalidAmount));
+        }
+
+        let mut sub: MeteredSubscription = env
+            .storage()
+            .instance()
+            .get(&DataKey::Subscription(SubscriptionKey::Metered(
+                subscription_id,
+            )))
+            .ok_or(Error::Subscription(SubscriptionError::MeteredNotFound))?;
+        if sub.merchant != merchant {
+            return Err(Error::Basic(BasicError::Unauthorized));
+        }
+
+        let schedule_id = env
+            .storage()
+            .instance()
+            .get::<DataKey, u64>(&DataKey::Feature(FeatureKey::SubscriptionTariff(
+                subscription_id,
+            )))
+            .ok_or(Error::Tariff(TariffError::ScheduleNotFound))?;
+        let schedule = storage::get_tariff_schedule(
+            &env,
+            &DataKey::Feature(FeatureKey::TariffSchedule(schedule_id)),
+        )
+        .ok_or(Error::Tariff(TariffError::ScheduleNotFound))?;
+        if !schedule.active || schedule.effective_from > env.ledger().timestamp() {
+            return Err(Error::Payment(PaymentError::NotYetDue));
+        }
+
+        if let Some(max_units) = sub.max_units_per_period {
+            if sub.accumulated_units.saturating_add(units) > max_units {
+                return Err(Error::Subscription(SubscriptionError::UsageCapExceeded));
+            }
+        }
+
+        // Validation guarantees exactly one band covers every minute of the day.
+        let minute = ((consumed_at % SECONDS_PER_DAY) / 60) as u32;
+        let mut band: Option<TariffBand> = None;
+        for i in 0..schedule.bands.len() {
+            let candidate = schedule.bands.get_unchecked(i);
+            if minute >= candidate.start_minute_utc && minute < candidate.end_minute_utc {
+                band = Some(candidate);
+                break;
+            }
+        }
+        let band = band.ok_or(Error::Tariff(TariffError::InvalidSchedule))?;
+        let cost = Self::tou_cost(&env, &band, units, consumed_at)?;
+        let new_cost = sub
+            .accumulated_cost
+            .checked_add(cost)
+            .ok_or(Error::Payment(PaymentError::BillingOverflow))?;
+        if let Some(cap) = sub.billing_cap {
+            if new_cost > cap {
+                return Err(Error::Subscription(SubscriptionError::BillingCapExceeded));
+            }
+        }
+
+        sub.accumulated_units = sub.accumulated_units.saturating_add(units);
+        sub.accumulated_cost = new_cost;
+        env.storage().instance().set(
+            &DataKey::Subscription(SubscriptionKey::Metered(subscription_id)),
+            &sub,
+        );
+        (UsageReported {
+            subscription_id,
+            units,
+            accumulated: sub.accumulated_units,
+        })
+        .publish(&env);
+        (TouUsageReported {
+            subscription_id,
+            units,
+            cost,
+            band_start_minute_utc: band.start_minute_utc,
+        })
+        .publish(&env);
+        Ok(cost)
     }
 
     fn validate_bps(bps: u32) -> Result<(), Error> {
@@ -15180,6 +17289,8 @@ mod test_trial;
 mod test_issue_113_115_119_120;
 #[cfg(test)]
 mod test_metadata;
+#[cfg(test)]
+mod test_prepaid_vault;
 
 #[cfg(test)]
 mod test_payment_channel;
@@ -15200,6 +17311,9 @@ mod test_cross_contract_escrow_verification;
 
 #[cfg(test)]
 mod test_metered_billing;
+
+#[cfg(test)]
+mod test_storefront;
 
 #[cfg(test)]
 mod test_installment_refund;
@@ -15248,4 +17362,10 @@ mod test_storage_keys;
 mod test_storage_ttl;
 
 #[cfg(test)]
+mod test_addon;
+#[cfg(test)]
 mod test_completion_fee_parity;
+
+#[cfg(test)]
+mod test_preauth;
+mod test_rebate_pool;

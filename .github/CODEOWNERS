@@ -1,0 +1,106 @@
+# CODEOWNERS — Cypher GridPay
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Ownership rules are evaluated top-to-bottom; the LAST matching pattern wins.
+# More specific rules are therefore placed after broader ones.
+#
+# NOTE: Teams referenced below (e.g. @cypher-gridpay/...) must exist in the
+# organization and have write access for the rule to take effect.
+
+# ---------------------------------------------------------------------------
+# Default owners for everything in the repository
+# ---------------------------------------------------------------------------
+*                                   @cypher-gridpay/maintainers
+
+# ---------------------------------------------------------------------------
+# Smart Contracts (security-sensitive)
+# ---------------------------------------------------------------------------
+/core/contracts/                    @cypher-gridpay/smart-contracts @cypher-gridpay/security
+/core/contracts/**                  @cypher-gridpay/smart-contracts @cypher-gridpay/security
+/contracts/                         @cypher-gridpay/smart-contracts @cypher-gridpay/security
+/contracts/**                       @cypher-gridpay/smart-contracts @cypher-gridpay/security
+
+# ---------------------------------------------------------------------------
+# Orchestrator (security-sensitive)
+# ---------------------------------------------------------------------------
+/orchestrator/                      @cypher-gridpay/orchestrator @cypher-gridpay/security
+/orchestrator/**                    @cypher-gridpay/orchestrator @cypher-gridpay/security
+
+# ---------------------------------------------------------------------------
+# SDKs
+# ---------------------------------------------------------------------------
+/sdk/                               @cypher-gridpay/sdk
+/sdk/**                             @cypher-gridpay/sdk
+/sdk/typescript/                    @cypher-gridpay/sdk-typescript
+/sdk/typescript/**                  @cypher-gridpay/sdk-typescript
+/sdk/python/                        @cypher-gridpay/sdk-python
+/sdk/python/**                      @cypher-gridpay/sdk-python
+
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+/frontend/                          @cypher-gridpay/frontend
+/frontend/**                        @cypher-gridpay/frontend
+/web/                               @cypher-gridpay/frontend
+/web/**                             @cypher-gridpay/frontend
+
+# ---------------------------------------------------------------------------
+# Backend services
+# ---------------------------------------------------------------------------
+/backend/                           @cypher-gridpay/backend
+/backend/**                         @cypher-gridpay/backend
+/services/                          @cypher-gridpay/backend
+/services/**                        @cypher-gridpay/backend
+/api/                               @cypher-gridpay/backend
+/api/**                             @cypher-gridpay/backend
+
+# ---------------------------------------------------------------------------
+# DevOps / Infrastructure (security-sensitive)
+# ---------------------------------------------------------------------------
+/.github/                           @cypher-gridpay/devops
+/.github/**                         @cypher-gridpay/devops
+/.github/workflows/                 @cypher-gridpay/devops @cypher-gridpay/security
+/.github/workflows/**               @cypher-gridpay/devops @cypher-gridpay/security
+/.github/CODEOWNERS                 @cypher-gridpay/devops @cypher-gridpay/security
+/.github/rulesets/                  @cypher-gridpay/devops @cypher-gridpay/security
+/.github/rulesets/**                @cypher-gridpay/devops @cypher-gridpay/security
+/infra/                             @cypher-gridpay/devops
+/infra/**                           @cypher-gridpay/devops
+/infra/terraform/                   @cypher-gridpay/devops @cypher-gridpay/security
+/infra/terraform/**                 @cypher-gridpay/devops @cypher-gridpay/security
+/terraform/                         @cypher-gridpay/devops
+/terraform/**                       @cypher-gridpay/devops
+/deploy/                            @cypher-gridpay/devops
+/deploy/**                          @cypher-gridpay/devops
+/docker/                            @cypher-gridpay/devops
+/docker/**                          @cypher-gridpay/devops
+Dockerfile                          @cypher-gridpay/devops
+docker-compose*.yml                 @cypher-gridpay/devops
+docker-compose*.yaml                @cypher-gridpay/devops
+
+# ---------------------------------------------------------------------------
+# Documentation
+# ---------------------------------------------------------------------------
+/docs/                              @cypher-gridpay/docs
+/docs/**                            @cypher-gridpay/docs
+/README.md                          @cypher-gridpay/docs
+/CHANGELOG.md                       @cypher-gridpay/docs
+/CONTRIBUTING.md                    @cypher-gridpay/docs
+/SECURITY.md                        @cypher-gridpay/docs @cypher-gridpay/security
+*.md                                @cypher-gridpay/docs
+
+# ---------------------------------------------------------------------------
+# Repository configuration & tooling
+# ---------------------------------------------------------------------------
+/package.json                       @cypher-gridpay/maintainers
+/package-lock.json                  @cypher-gridpay/maintainers
+/pnpm-lock.yaml                     @cypher-gridpay/maintainers
+/yarn.lock                          @cypher-gridpay/maintainers
+/tsconfig*.json                     @cypher-gridpay/maintainers
+/.eslintrc*                         @cypher-gridpay/maintainers
+/.prettierrc*                       @cypher-gridpay/maintainers
+/.editorconfig                      @cypher-gridpay/maintainers
+/.gitignore                         @cypher-gridpay/maintainers
+</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>

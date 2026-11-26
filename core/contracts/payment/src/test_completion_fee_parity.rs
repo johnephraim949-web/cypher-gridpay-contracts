@@ -341,9 +341,8 @@ fn fee_waiver_applied_events(env: &Env, contract_id: &Address) -> Vec<(u64, u64,
             continue;
         }
         let payload = Map::<Val, Val>::try_from_val(env, &data).unwrap();
-        let field = |key: &str| -> Val {
-            payload.get(Symbol::new(env, key).into_val(env)).unwrap()
-        };
+        let field =
+            |key: &str| -> Val { payload.get(Symbol::new(env, key).into_val(env)).unwrap() };
         found.push_back((
             u64::try_from_val(env, &field("payment_id")).unwrap(),
             u64::try_from_val(env, &field("campaign_id")).unwrap(),
@@ -371,9 +370,19 @@ fn fee_waiver_partial_budget_exhaustion_charges_remaining_fee() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         0
     );
-    let p1 = create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    let p1 = create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
     let events = fee_waiver_applied_events(&env, &contract_id);
-    assert!(events.iter().any(|e| e.0 == p1 && e.1 == 7 && e.2 == 100 && e.3 == 50));
+    assert!(events
+        .iter()
+        .any(|e| e.0 == p1 && e.1 == 7 && e.2 == 100 && e.3 == 50));
 
     let token_client = token::Client::new(&env, &token_addr);
     assert_eq!(token_client.balance(&merchant), 10_000);
@@ -389,9 +398,19 @@ fn fee_waiver_partial_budget_exhaustion_charges_remaining_fee() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         50
     );
-    let p2 = create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    let p2 = create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
     let events = fee_waiver_applied_events(&env, &contract_id);
-    assert!(events.iter().any(|e| e.0 == p2 && e.1 == 7 && e.2 == 50 && e.3 == 0));
+    assert!(events
+        .iter()
+        .any(|e| e.0 == p2 && e.1 == 7 && e.2 == 50 && e.3 == 0));
 
     assert_eq!(token_client.balance(&merchant), 10_000 + 9_950);
     assert_eq!(client.get_accumulated_fees(), 50);
@@ -403,7 +422,15 @@ fn fee_waiver_partial_budget_exhaustion_charges_remaining_fee() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         100
     );
-    let p3 = create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    let p3 = create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
     let events = fee_waiver_applied_events(&env, &contract_id);
     assert!(!events.iter().any(|e| e.0 == p3));
 
@@ -432,7 +459,15 @@ fn fee_waiver_honours_validity_window_boundaries() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         100
     );
-    create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
 
     let token_client = token::Client::new(&env, &token_addr);
     assert_eq!(token_client.balance(&merchant), 9_900);
@@ -445,7 +480,15 @@ fn fee_waiver_honours_validity_window_boundaries() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         0
     );
-    create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
 
     assert_eq!(token_client.balance(&merchant), 9_900 + 10_000);
     assert_eq!(client.get_accumulated_fees(), 100);
@@ -457,7 +500,15 @@ fn fee_waiver_honours_validity_window_boundaries() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         100
     );
-    create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
 
     assert_eq!(token_client.balance(&merchant), 9_900 + 10_000 + 9_900);
     assert_eq!(client.get_accumulated_fees(), 200);
@@ -475,13 +526,31 @@ fn fee_waiver_caps_uses_per_address() {
     mint_and_approve(&env, &token_addr, &contract_id, &other_customer, 10_000);
 
     // 1_000 budget, but at most 2 waived payments per customer address.
-    grant_campaign(&env, &client, &admin, &merchant, 11, 1_000, 2, 0, 10_000_000);
+    grant_campaign(
+        &env, &client, &admin, &merchant, 11, 1_000, 2, 0, 10_000_000,
+    );
 
     let token_client = token::Client::new(&env, &token_addr);
 
     // Uses 1 and 2 for `customer` are waived.
-    create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
-    create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
+    create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
     assert_eq!(token_client.balance(&merchant), 20_000);
     assert_eq!(client.get_accumulated_fees(), 0);
 
@@ -490,7 +559,15 @@ fn fee_waiver_caps_uses_per_address() {
         client.calculate_fee(&10_000, &merchant, &customer, &Currency::USDC),
         100
     );
-    create_and_complete(&env, &client, &admin, &customer, &merchant, &token_addr, 10_000);
+    create_and_complete(
+        &env,
+        &client,
+        &admin,
+        &customer,
+        &merchant,
+        &token_addr,
+        10_000,
+    );
     assert_eq!(token_client.balance(&merchant), 20_000 + 9_900);
     assert_eq!(client.get_accumulated_fees(), 100);
 
@@ -509,7 +586,9 @@ fn fee_waiver_caps_uses_per_address() {
         10_000,
     );
     let events = fee_waiver_applied_events(&env, &contract_id);
-    assert!(events.iter().any(|e| e.0 == p4 && e.1 == 11 && e.2 == 100 && e.3 == 700));
+    assert!(events
+        .iter()
+        .any(|e| e.0 == p4 && e.1 == 11 && e.2 == 100 && e.3 == 700));
 
     assert_eq!(token_client.balance(&merchant), 20_000 + 9_900 + 10_000);
     assert_eq!(client.get_accumulated_fees(), 100);

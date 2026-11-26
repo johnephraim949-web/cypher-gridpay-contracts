@@ -139,8 +139,7 @@ fn file_appeal_at_exact_deadline_is_rejected() {
     client.dispute_escrow(&customer, &escrow_id);
 
     // Exactly at the deadline (`dispute_started_at + APPEAL_WINDOW_SECONDS`).
-    env.ledger()
-        .set_timestamp(1_000 + 259_200);
+    env.ledger().set_timestamp(1_000 + 259_200);
     let reason: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
     let result = client.try_file_dispute_appeal(&customer, &escrow_id, &reason);
 
@@ -175,8 +174,7 @@ fn file_appeal_one_second_before_deadline_succeeds() {
     );
     client.dispute_escrow(&customer, &escrow_id);
 
-    env.ledger()
-        .set_timestamp(1_000 + 259_200 - 1);
+    env.ledger().set_timestamp(1_000 + 259_200 - 1);
     let reason: BytesN<32> = BytesN::from_array(&env, &[0u8; 32]);
     let appeal_id = client.file_dispute_appeal(&customer, &escrow_id, &reason);
 

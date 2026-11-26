@@ -353,7 +353,10 @@ use soroban_sdk::BytesN;
 /// The real CIDv1 alphabet constraint is not enforced here — just prefix + length.
 fn make_cid(env: &Env, _tag: u8) -> soroban_sdk::String {
     // 59-char real-world CIDv1 — valid prefix "bafy", valid length.
-    soroban_sdk::String::from_str(env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
+    soroban_sdk::String::from_str(
+        env,
+        "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
+    )
 }
 
 fn make_ar_cid(env: &Env) -> soroban_sdk::String {
@@ -440,7 +443,10 @@ fn test_commit_bundle_merchant_allowed() {
     let cid = make_cid(&env, b'y');
 
     let result = client.try_commit_evidence_bundle(&merchant, &escrow_id, &root, &cid, &10u32);
-    assert!(result.is_ok(), "merchant must be allowed to commit a bundle");
+    assert!(
+        result.is_ok(),
+        "merchant must be allowed to commit a bundle"
+    );
 }
 
 #[test]
@@ -451,13 +457,31 @@ fn test_commit_bundle_increments_count() {
 
     assert_eq!(client.get_evidence_bundle_count(&escrow_id), 0u32);
 
-    client.commit_evidence_bundle(&customer, &escrow_id, &root_from(&env, 1), &make_cid(&env, b'a'), &1u32);
+    client.commit_evidence_bundle(
+        &customer,
+        &escrow_id,
+        &root_from(&env, 1),
+        &make_cid(&env, b'a'),
+        &1u32,
+    );
     assert_eq!(client.get_evidence_bundle_count(&escrow_id), 1u32);
 
-    client.commit_evidence_bundle(&merchant, &escrow_id, &root_from(&env, 2), &make_cid(&env, b'b'), &1u32);
+    client.commit_evidence_bundle(
+        &merchant,
+        &escrow_id,
+        &root_from(&env, 2),
+        &make_cid(&env, b'b'),
+        &1u32,
+    );
     assert_eq!(client.get_evidence_bundle_count(&escrow_id), 2u32);
 
-    client.commit_evidence_bundle(&customer, &escrow_id, &root_from(&env, 3), &make_cid(&env, b'c'), &1u32);
+    client.commit_evidence_bundle(
+        &customer,
+        &escrow_id,
+        &root_from(&env, 3),
+        &make_cid(&env, b'c'),
+        &1u32,
+    );
     assert_eq!(client.get_evidence_bundle_count(&escrow_id), 3u32);
 }
 
@@ -472,7 +496,11 @@ fn test_commit_bundle_cid_too_short_rejected() {
     // Only 10 bytes — below the 32-byte minimum.
     let short_cid = soroban_sdk::String::from_str(&env, "bafy123456");
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &short_cid, &1u32,
+        &customer,
+        &escrow_id,
+        &zero_root(&env),
+        &short_cid,
+        &1u32,
     );
     assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidCidUri))));
 }
@@ -488,7 +516,11 @@ fn test_commit_bundle_cid_too_long_rejected() {
     let long_cid = soroban_sdk::String::from_str(&env,
         "bafyzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &long_cid, &1u32,
+        &customer,
+        &escrow_id,
+        &zero_root(&env),
+        &long_cid,
+        &1u32,
     );
     assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidCidUri))));
 }
@@ -500,11 +532,12 @@ fn test_commit_bundle_invalid_prefix_rejected() {
     let escrow_id = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
 
     // Valid length but wrong prefix ("ipfs://…").
-    let bad_cid = soroban_sdk::String::from_str(&env,
-        "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtzy55fbzdi");
-    let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &bad_cid, &1u32,
+    let bad_cid = soroban_sdk::String::from_str(
+        &env,
+        "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtzy55fbzdi",
     );
+    let result =
+        client.try_commit_evidence_bundle(&customer, &escrow_id, &zero_root(&env), &bad_cid, &1u32);
     assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidCidUri))));
 }
 
@@ -526,13 +559,9 @@ fn test_commit_bundle_control_char_in_cid_rejected() {
         0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, // xxxxxxxxxx
         0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, 0x78, // xxxxxxxx
     ];
-    let bad_cid = soroban_sdk::String::from_bytes(
-        &env,
-        &cid_bytes,
-    );
-    let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &bad_cid, &1u32,
-    );
+    let bad_cid = soroban_sdk::String::from_bytes(&env, &cid_bytes);
+    let result =
+        client.try_commit_evidence_bundle(&customer, &escrow_id, &zero_root(&env), &bad_cid, &1u32);
     assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidCidUri))));
 }
 
@@ -552,7 +581,10 @@ fn test_commit_bundle_duplicate_root_same_submitter_rejected() {
 
     // Same submitter, same root — must be rejected.
     let result = client.try_commit_evidence_bundle(&customer, &escrow_id, &root, &cid2, &1u32);
-    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::DuplicateMerkleRoot))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::DuplicateMerkleRoot)))
+    );
 }
 
 #[test]
@@ -568,8 +600,17 @@ fn test_commit_bundle_same_root_different_submitter_allowed() {
     client.commit_evidence_bundle(&customer, &escrow_id, &root, &cid, &1u32);
 
     // Merchant commits the *same* root — different submitter, so allowed.
-    let result = client.try_commit_evidence_bundle(&merchant, &escrow_id, &root, &make_cid(&env, b'q'), &1u32);
-    assert!(result.is_ok(), "different submitter may commit the same root");
+    let result = client.try_commit_evidence_bundle(
+        &merchant,
+        &escrow_id,
+        &root,
+        &make_cid(&env, b'q'),
+        &1u32,
+    );
+    assert!(
+        result.is_ok(),
+        "different submitter may commit the same root"
+    );
 }
 
 #[test]
@@ -584,7 +625,8 @@ fn test_commit_bundle_different_root_same_submitter_allowed() {
     client.commit_evidence_bundle(&customer, &escrow_id, &root1, &make_cid(&env, b'a'), &1u32);
 
     // Different root — should be accepted and assigned bundle_id 2.
-    let id = client.commit_evidence_bundle(&customer, &escrow_id, &root2, &make_cid(&env, b'b'), &1u32);
+    let id =
+        client.commit_evidence_bundle(&customer, &escrow_id, &root2, &make_cid(&env, b'b'), &1u32);
     assert_eq!(id, 2u32);
 }
 
@@ -597,9 +639,16 @@ fn test_commit_bundle_zero_leaf_count_rejected() {
     let escrow_id = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
 
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &make_cid(&env, b'z'), &0u32,
+        &customer,
+        &escrow_id,
+        &zero_root(&env),
+        &make_cid(&env, b'z'),
+        &0u32,
     );
-    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidBundleLeafCount))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::InvalidBundleLeafCount)))
+    );
 }
 
 #[test]
@@ -610,9 +659,16 @@ fn test_commit_bundle_over_max_leaf_count_rejected() {
 
     // 10_001 > 10_000 maximum.
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &make_cid(&env, b'z'), &10_001u32,
+        &customer,
+        &escrow_id,
+        &zero_root(&env),
+        &make_cid(&env, b'z'),
+        &10_001u32,
     );
-    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidBundleLeafCount))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::InvalidBundleLeafCount)))
+    );
 }
 
 #[test]
@@ -622,7 +678,11 @@ fn test_commit_bundle_max_leaf_count_accepted() {
     let escrow_id = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
 
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &root_from(&env, 1), &make_cid(&env, b'z'), &10_000u32,
+        &customer,
+        &escrow_id,
+        &root_from(&env, 1),
+        &make_cid(&env, b'z'),
+        &10_000u32,
     );
     assert!(result.is_ok(), "10_000 leaves must be accepted");
 }
@@ -637,7 +697,11 @@ fn test_commit_bundle_non_participant_rejected() {
 
     let stranger = Address::generate(&env);
     let result = client.try_commit_evidence_bundle(
-        &stranger, &escrow_id, &zero_root(&env), &make_cid(&env, b'z'), &1u32,
+        &stranger,
+        &escrow_id,
+        &zero_root(&env),
+        &make_cid(&env, b'z'),
+        &1u32,
     );
     assert_eq!(result, Err(Ok(Error::Basic(BasicError::Unauthorized))));
 }
@@ -653,7 +717,11 @@ fn test_commit_bundle_non_disputed_escrow_rejected() {
     );
 
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &make_cid(&env, b'z'), &1u32,
+        &customer,
+        &escrow_id,
+        &zero_root(&env),
+        &make_cid(&env, b'z'),
+        &1u32,
     );
     assert_eq!(result, Err(Ok(Error::Action(ActionError::NotDisputed))));
 }
@@ -665,7 +733,11 @@ fn test_commit_bundle_not_found_rejected() {
 
     let stranger = Address::generate(&env);
     let result = client.try_commit_evidence_bundle(
-        &stranger, &999u64, &zero_root(&env), &make_cid(&env, b'z'), &1u32,
+        &stranger,
+        &999u64,
+        &zero_root(&env),
+        &make_cid(&env, b'z'),
+        &1u32,
     );
     assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::NotFound))));
 }
@@ -684,9 +756,16 @@ fn test_commit_bundle_after_evidence_deadline_rejected() {
     env.ledger().set_timestamp(1_000 + SEVEN_DAYS + 1);
 
     let result = client.try_commit_evidence_bundle(
-        &customer, &escrow_id, &zero_root(&env), &make_cid(&env, b'z'), &1u32,
+        &customer,
+        &escrow_id,
+        &zero_root(&env),
+        &make_cid(&env, b'z'),
+        &1u32,
     );
-    assert_eq!(result, Err(Ok(Error::Action(ActionError::EvidenceDeadlinePassed))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Action(ActionError::EvidenceDeadlinePassed)))
+    );
 }
 
 // ---- verify_evidence_bundle_item -------------------------------------------
@@ -733,9 +812,8 @@ fn test_verify_bundle_item_nonexistent_bundle_returns_false() {
 
     let proof: Vec<BytesN<32>> = Vec::new(&env);
     // Bundle 99 was never committed.
-    let valid = client.verify_evidence_bundle_item(
-        &escrow_id, &99u32, &zero_root(&env), &proof, &0u32,
-    );
+    let valid =
+        client.verify_evidence_bundle_item(&escrow_id, &99u32, &zero_root(&env), &proof, &0u32);
     assert!(!valid, "non-existent bundle must return false");
 }
 
@@ -761,7 +839,10 @@ fn test_verify_bundle_item_two_leaf_tree() {
     let mut raw = [0u8; 64];
     raw[..32].copy_from_slice(&h0.to_array());
     raw[32..].copy_from_slice(&h1.to_array());
-    let root: BytesN<32> = env.crypto().keccak256(&soroban_sdk::Bytes::from_array(&env, &raw)).into();
+    let root: BytesN<32> = env
+        .crypto()
+        .keccak256(&soroban_sdk::Bytes::from_array(&env, &raw))
+        .into();
 
     client.commit_evidence_bundle(&customer, &escrow_id, &root, &make_cid(&env, b'x'), &2u32);
 
@@ -782,9 +863,27 @@ fn test_bundles_isolated_per_escrow() {
     let escrow_a = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
     let escrow_b = make_disputed_escrow(&env, &client, &customer, &merchant, &token);
 
-    client.commit_evidence_bundle(&customer, &escrow_a, &root_from(&env, 1), &make_cid(&env, b'a'), &1u32);
-    client.commit_evidence_bundle(&customer, &escrow_a, &root_from(&env, 2), &make_cid(&env, b'b'), &1u32);
-    client.commit_evidence_bundle(&customer, &escrow_b, &root_from(&env, 3), &make_cid(&env, b'c'), &1u32);
+    client.commit_evidence_bundle(
+        &customer,
+        &escrow_a,
+        &root_from(&env, 1),
+        &make_cid(&env, b'a'),
+        &1u32,
+    );
+    client.commit_evidence_bundle(
+        &customer,
+        &escrow_a,
+        &root_from(&env, 2),
+        &make_cid(&env, b'b'),
+        &1u32,
+    );
+    client.commit_evidence_bundle(
+        &customer,
+        &escrow_b,
+        &root_from(&env, 3),
+        &make_cid(&env, b'c'),
+        &1u32,
+    );
 
     assert_eq!(client.get_evidence_bundle_count(&escrow_a), 2u32);
     assert_eq!(client.get_evidence_bundle_count(&escrow_b), 1u32);
@@ -808,12 +907,19 @@ fn test_bundle_commit_uses_fixed_storage_regardless_of_leaf_count() {
     let before = env.to_ledger_snapshot();
 
     client.commit_evidence_bundle(
-        &customer, &escrow_id, &root_from(&env, 0xCC), &make_cid(&env, b'z'), &1_000u32,
+        &customer,
+        &escrow_id,
+        &root_from(&env, 0xCC),
+        &make_cid(&env, b'z'),
+        &1_000u32,
     );
 
     let after = env.to_ledger_snapshot();
 
     // Exactly 3 new entries added (bundle record, count, dedup guard).
     let delta = after.ledger_entries.len() as i64 - before.ledger_entries.len() as i64;
-    assert_eq!(delta, 3, "bundle commitment must add exactly 3 ledger entries");
+    assert_eq!(
+        delta, 3,
+        "bundle commitment must add exactly 3 ledger entries"
+    );
 }

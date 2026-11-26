@@ -35,7 +35,10 @@ fn escrow_refundable_after_hold_period_elapsed() {
 
     // Verify hold_period_until is set correctly
     let escrow = client.get_escrow(&escrow_id);
-    assert_eq!(escrow.hold_period_until, 1500, "hold_period_until should be 1500");
+    assert_eq!(
+        escrow.hold_period_until, 1500,
+        "hold_period_until should be 1500"
+    );
 
     // Advance past hold period: 1500 + 1 second = 1501
     env.ledger().set_timestamp(1501);
@@ -64,7 +67,10 @@ fn escrow_not_refundable_before_hold_period_elapsed() {
 
     // Verify hold_period_until is set correctly
     let escrow = client.get_escrow(&escrow_id);
-    assert_eq!(escrow.hold_period_until, 1500, "hold_period_until should be 1500");
+    assert_eq!(
+        escrow.hold_period_until, 1500,
+        "hold_period_until should be 1500"
+    );
 
     // Attempt refund before hold period expires (at t=1400, which is before hold_period_until=1500)
     env.ledger().set_timestamp(1400);
@@ -77,8 +83,11 @@ fn escrow_not_refundable_before_hold_period_elapsed() {
     if let Err(e) = result {
         match e {
             Ok(err) => {
-                assert_eq!(err, Error::Escrow(EscrowError::HoldPeriodActive),
-                    "expected HoldPeriodActive error");
+                assert_eq!(
+                    err,
+                    Error::Escrow(EscrowError::HoldPeriodActive),
+                    "expected HoldPeriodActive error"
+                );
             }
             _ => panic!("Expected contract error"),
         }
@@ -103,7 +112,10 @@ fn refund_after_hold_period_transfers_correct_amount() {
 
     // Verify hold_period_until is set correctly
     let escrow = client.get_escrow(&escrow_id);
-    assert_eq!(escrow.hold_period_until, 2300, "hold_period_until should be 2300");
+    assert_eq!(
+        escrow.hold_period_until, 2300,
+        "hold_period_until should be 2300"
+    );
 
     let balance_before = token_client.balance(&customer);
 

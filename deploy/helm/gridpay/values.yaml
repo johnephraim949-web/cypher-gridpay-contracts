@@ -1,0 +1,126 @@
+# Cypher GridPay chart defaults.
+# REALITY CHECK (upstream main at time of writing):
+#  - crank-worker: real (services/crank-worker, metrics on CRANK_METRICS_PORT), Dockerfile lands with PR #499.
+#  - relayer: library only, no entrypoint or Dockerfile yet -> disabled, placeholder.
+#  - api, indexer, webhook-worker, web: README-only / no package.json -> disabled, placeholders.
+#  - ttl-keeper: packaged as a CronJob in ops/ttl-keeper (PR #499); this chart does not duplicate it.
+# Images below are placeholders; nothing here has been built or published.
+global:
+  network: testnet
+  imageRegistry: ghcr.io/johnephraim949-web
+  sorobanRpcUrl: ""        # set in overlays
+  networkPassphrase: ""    # set in overlays
+
+# External Secrets Operator. Never put secret keys or passwords in values.
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: gridpay-secret-store
+    kind: ClusterSecretStore
+  refreshInterval: 1h
+  # remoteRef keys in Vault / AWS SM / GCP SM. Values are references only.
+  remoteRefs:
+    databaseUrl: gridpay/database-url
+    redisUrl: gridpay/redis-url
+    signerKmsKeyId: gridpay/signer-kms-key-id
+
+networkPolicy:
+  enabled: true
+  # Approved egress (CIDRs). Empty = DNS only. Fill with RPC / Postgres / Redis CIDRs.
+  egressCIDRs: []
+  egressPorts: [443, 5432, 6379]
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+services:
+  crank-worker:
+    enabled: true
+    image: crank-worker
+    tag: latest            # placeholder; pin a digest in production
+    replicas: 1            # single scheduler; raise only with a lease lock
+    port: 9464
+    metricsPath: /metrics
+    env:
+      CRANK_METRICS_PORT: "9464"
+    probes: tcp            # no /healthz exists; TCP on the metrics port
+    hpa: {enabled: false}
+    pdb: {enabled: false}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  relayer:
+    enabled: false         # PLACEHOLDER: no entrypoint in services/relayer
+    image: relayer
+    tag: latest
+    replicas: 2
+    port: 8080
+    env: {}
+    probes: tcp
+    hpa: {enabled: true, minReplicas: 2, maxReplicas: 6, cpu: 70}
+    pdb: {enabled: true, minAvailable: 1}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  indexer:
+    enabled: false         # PLACEHOLDER: README-only. Must stay replicas=1 (single active leader).
+    image: indexer
+    tag: latest
+    replicas: 1
+    port: 8081
+    env: {}
+    probes: tcp
+    hpa: {enabled: false}
+    pdb: {enabled: false}
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {cpu: "1", memory: 512Mi}
+  api:
+    enabled: false         # PLACEHOLDER: no api service in repo
+    image: api
+    tag: latest
+    replicas: 2
+    port: 8082
+    env: {}
+    probes: tcp
+    hpa: {enabled: true, minReplicas: 2, maxReplicas: 8, cpu: 70}
+    pdb: {enabled: true, minAvailable: 1}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  webhook-worker:
+    enabled: false         # PLACEHOLDER: no webhook worker in repo (queue-depth HPA needs KEDA/custom metrics)
+    image: webhook-worker
+    tag: latest
+    replicas: 2
+    port: 8083
+    env: {}
+    probes: tcp
+    hpa: {enabled: true, minReplicas: 2, maxReplicas: 6, cpu: 70}
+    pdb: {enabled: true, minAvailable: 1}
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+  web:
+    enabled: false         # PLACEHOLDER: apps/web has no package.json
+    image: web
+    tag: latest
+    replicas: 2
+    port: 3000
+    env: {}
+    probes: tcp
+    hpa: {enabled: true, minReplicas: 2, maxReplicas: 6, cpu: 70}
+    pdb: {enabled: true, minAvailable: 1}
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 250m, memory: 128Mi}
