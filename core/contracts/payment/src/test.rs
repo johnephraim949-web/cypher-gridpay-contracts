@@ -80,3 +80,182 @@ proptest! {
         }
     }
 }
+
+
+use super::*;
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    token, vec, Address, Env, String, Vec,
+};
+
+type TestSetup<'a> = (
+    PaymentContractClient<'a>,
+    Address,
+    Address,
+    Address,
+    Address,
+    soroban_sdk::Address,
+);
+
+fn setup_token_lifecycle(env: &Env) -> TestSetup<'_> {
+    let id = env.register(PaymentContract, ());
+    let client = PaymentContractClient::new(env, &id);
+    env.mock_all_auths();
+    let admin = Address::generate(env);
+    client.initialize(&admin);
+
+    let token_admin = Address::generate(env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin);
+    let token_address = token_contract.address();
+    let asset_client = token::StellarAssetClient::new(env, &token_address);
+    let customer = Address::generate(env);
+    let merchant = Address::generate(env);
+    asset_client.mint(&customer, &1_000_000i128);
+    token::Client::new(env, &token_address).approve(&customer, &id, &1_000_000i128, &100_000);
+
+    (
+        client,
+        id,
+        admin,
+        customer,
+        merchant,
+        token_address,
+    )
+}
+
+#[test]
+fn deprecation_blocks_new_activity_but_allows_existing_winddown() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (client, _id, admin, customer, merchant, token_address) = setup_token_lifecycle(&env);
+    client.add_allowed_token(&admin, &token_address);
+    let payment_id = client.create_payment(
+        &customer,
+        &merchant,
+        &100i128,
+        &token_address,
+        &Currency::USDC,
+        &0u64,
+        &String::from_str(&env, "metadata"),
+    );
+
+    client.deprecate_allowed_token(
+        &admin,
+        &token_address,
+        &String::from_str(&env, "risk review"),
+    );
+
+    assert_eq!(
+        client.get_token_status(&token_address),
+        TokenLifecycleStatus::DrainOnly
+    );
+    assert!(client.get_allowed_tokens().is_empty());
+    assert_eq!(
+        client.try_create_payment(
+            &customer,
+            &merchant,
+            &100i128,
+            &token_address,
+            &Currency::USDC,
+            &0u64,
+            &String::from_str(&env, "metadata"),
+        ),
+        Err(Ok(Error::Payment(PaymentError::TokenNotAllowed)))
+    );
+    assert_eq!(
+        client.try_schedule_payment(&customer, &merchant, &token_address, &100i128, &10_000u64),
+        Err(Ok(Error::Payment(PaymentError::TokenNotAllowed)))
+    );
+    assert_eq!(
+        client.try_create_subscription(
+            &customer,
+            &merchant,
+            &100i128,
+            &token_address,
+            &Currency::USDC,
+            &1_000u64,
+            &0u64,
+            &0u64,
+            &String::from_str(&env, "metadata"),
+            &0u64,
+        ),
+        Err(Ok(Error::Payment(PaymentError::TokenNotAllowed)))
+    );
+
+    client.complete_payment(&admin, &payment_id);
+    assert_eq!(
+        client.get_payment(&payment_id).status,
+        PaymentStatus::Completed
+    );
+}
+
+#[test]
+fn removal_requires_zero_liability_and_multisig_override() {
+    let env = Env::default();
+    env.ledger().set_timestamp(1_000);
+    let (client, _id, admin, customer, merchant, token_address) = setup_token_lifecycle(&env);
+    client.add_allowed_token(&admin, &token_address);
+    client.create_payment(
+        &customer,
+        &merchant,
+        &100i128,
+        &token_address,
+        &Currency::USDC,
+        &0u64,
+        &String::from_str(&env, "metadata"),
+    );
+
+    assert_eq!(
+        client.try_remove_allowed_token(&admin, &token_address),
+        Err(Ok(Error::Feature(
+            FeatureError::TokenStillHasLiabilities
+        )))
+    );
+
+    let second_admin = Address::generate(&env);
+    client.add_admin(&admin, &second_admin);
+    client.update_required_signatures(&admin, &2u32);
+
+    let insufficient: Vec<Address> = vec![&env, second_admin.clone()];
+    assert_eq!(
+        client.try_force_remove_allowed_token(&admin, &token_address, &insufficient),
+        Err(Ok(Error::Feature(
+            FeatureError::InvalidTokenLifecycleApprovals
+        )))
+    );
+
+    let approvals: Vec<Address> = vec![&env, admin.clone(), second_admin];
+    client.force_remove_allowed_token(&admin, &token_address, &approvals);
+    assert_eq!(
+        client.get_token_status(&token_address),
+        TokenLifecycleStatus::Removed
+    );
+    assert!(client.get_allowed_tokens().is_empty());
+}
+
+#[test]
+fn reactivating_removed_token_requires_multisig() {
+    let env = Env::default();
+    let (client, _id, admin, _customer, _merchant, token_address) = setup_token_lifecycle(&env);
+    client.add_allowed_token(&admin, &token_address);
+    client.remove_allowed_token(&admin, &token_address);
+
+    assert_eq!(
+        client.try_add_allowed_token(&admin, &token_address),
+        Err(Ok(Error::Feature(
+            FeatureError::TokenLifecycleRequiresMultiSig
+        )))
+    );
+
+    let second_admin = Address::generate(&env);
+    client.add_admin(&admin, &second_admin);
+    client.update_required_signatures(&admin, &2u32);
+    let approvals: Vec<Address> = vec![&env, admin.clone(), second_admin];
+    client.reactivate_removed_token(&admin, &token_address, &approvals);
+
+    assert_eq!(
+        client.get_token_status(&token_address),
+        TokenLifecycleStatus::Active
+    );
+    assert!(client.get_allowed_tokens().contains(&token_address));
+}

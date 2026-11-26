@@ -1,0 +1,40 @@
+# Plain Kubernetes manifest (no Helm chart exists in this repo yet).
+# Prereqs: a Secret `ttl-keeper` with KEEPER_SECRET, and the image built from ops/ttl-keeper/Dockerfile.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gridpay-ttl-keeper
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+          containers:
+            - name: ttl-keeper
+              image: ghcr.io/johnephraim949-web/gridpay-ttl-keeper:REPLACE_WITH_SHA_TAG
+              securityContext:
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              env:
+                - { name: SOROBAN_RPC_URL, value: "https://soroban-testnet.stellar.org" }
+                - { name: NETWORK_PASSPHRASE, value: "Test SDF Network ; September 2015" }
+                - { name: CONTRACT_IDS, value: "REPLACE_PAYMENT_ID,REPLACE_ESCROW_ID,REPLACE_REFUND_ID,REPLACE_ADMIN_ID" }
+                - { name: MIN_TTL_THRESHOLD, value: "518400" }
+                - { name: TARGET_TTL_LEDGERS, value: "3110400" }
+                - { name: MAX_XLM_PER_RUN, value: "10" }
+                - name: KEEPER_SECRET
+                  valueFrom:
+                    secretKeyRef: { name: ttl-keeper, key: KEEPER_SECRET }
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 256Mi }

@@ -1,0 +1,75 @@
+# Tear down PR preview environments (issue #376).
+#
+# Runs when a PR is closed (merged or not) or when the `deploy-preview` label
+# is removed. Deletes the Cloudflare Pages preview deployments for the PR
+# branch alias and marks the sticky comment as torn down.
+#
+# Limitation: Stellar Testnet contract instances cannot be deleted. They are
+# abandoned and expire with their ledger TTL; the cleanup only reclaims the
+# hosting resources.
+#
+# Same-repo PRs only; `pull_request` gives fork PRs no secrets anyway.
+
+name: PR Preview Cleanup
+
+on:
+  pull_request:
+    types: [closed, unlabeled]
+
+permissions: {}
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Remove preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pr-preview
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action == 'closed' ||
+       (github.event.action == 'unlabeled' && github.event.label.name == 'deploy-preview'))
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Delete Cloudflare Pages preview deployments
+        run: |
+          set -euo pipefail
+          if [ -z "${CF_PAGES_PROJECT:-}" ] || [ -z "${CLOUDFLARE_API_TOKEN:-}" ]; then
+            echo "Cloudflare Pages is not configured; nothing to delete."
+            exit 0
+          fi
+          base="https://api.cloudflare.com/client/v4/accounts/${CLOUDFLARE_ACCOUNT_ID}/pages/projects/${CF_PAGES_PROJECT}/deployments"
+          auth="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
+          # Only the first page (up to 25 by default) is inspected per run.
+          ids=$(curl -fsS -H "$auth" "${base}?env=preview" \
+            | jq -r --arg b "pr-${PR_NUMBER}" '.result[] | select(.deployment_trigger.metadata.branch == $b) | .id')
+          for id in $ids; do
+            echo "Deleting deployment ${id}"
+            curl -fsS -X DELETE -H "$auth" "${base}/${id}?force=true" >/dev/null
+          done
+
+      - name: Mark sticky comment as torn down
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const marker = '<!-- pr-preview -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id,
+                body: `${marker}\n### PR preview torn down\n\nThe Web Console preview was removed. Testnet contract instances are abandoned and expire with their ledger TTL.`,
+              });
+            }

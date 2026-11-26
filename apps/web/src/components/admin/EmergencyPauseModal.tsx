@@ -1,22 +1,15 @@
 /**
  * EmergencyPauseModal.tsx
  *
- * Calibrated-friction confirmation modals for high-stakes admin actions in the
- * Cypher GridPay Admin Orchestrator.
+ * Calibrated-friction confirmation modals for high-stakes admin actions.
+ * Implements docs/ux/admin-orchestrator-safety-ux.md
  *
- * Implements the UX spec in docs/ux/admin-orchestrator-safety-ux.md
- *
- * Exports:
- *   EnvironmentBanner       — Persistent network identification strip.
- *   StandardActionModal     — Diff table + single confirm (parameter tweaks).
- *   HighImpactActionModal   — Diff + checksum + typed phrase + justification.
- *   EmergencyPauseModal     — HighImpact with 5-second abort-able countdown.
- *
- * Design invariants:
- *   - Modals never auto-open. Must be triggered by an explicit user action.
- *   - Confirm button is disabled until ALL guards for that tier are satisfied.
- *   - emergency_pause_all on Mainnet uses a 5-second countdown after guards pass.
- *   - Auditor role renders all action buttons as visually-disabled with tooltip.
+ * i18n / RTL changes (issue #424):
+ *   - All physical margin-left/right, padding-left/right, border-left,
+ *     text-align: left → logical equivalents.
+ *   - WASM checksums and signing addresses wrapped in dir="ltr" bidi-isolate
+ *     so hex strings never reorder inside RTL paragraphs.
+ *   - Diff table old/new values wrapped in dir="ltr" isolate spans.
  */
 
 import React, {
@@ -39,7 +32,6 @@ export interface DiffField {
   label: string;
   oldValue: string;
   newValue: string;
-  /** If true the field is hidden unless "Show all fields" is toggled. */
   unchanged?: boolean;
 }
 
@@ -52,28 +44,55 @@ export interface StandardActionModalProps {
   title: string;
   diff: DiffField[];
   signerAddress?: string;
-  multisigDescription?: string; // e.g. "2-of-3 multisig required"
+  multisigDescription?: string;
   viewerRole?: ViewerRole;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
 export interface HighImpactActionModalProps extends StandardActionModalProps {
-  /** The required confirmation phrase, e.g. "UPGRADE PAYMENT" */
   confirmationPhrase: string;
-  /** SHA-256 hex string (64 chars). Pass undefined to skip checksum guard. */
   wasmChecksumExpected?: string;
-  /** Promise that resolves to true if the uploaded artifact matches. */
   wasmChecksumVerified?: boolean | "pending";
 }
 
 export interface EmergencyPauseModalProps
   extends Omit<HighImpactActionModalProps, "confirmationPhrase"> {
   network: Network;
-  /** "all" or specific subsystem name ("escrow", "payments", "refunds") */
   pauseScope: "all" | "escrow" | "payments" | "refunds";
-  /** Countdown seconds before auto-submit. Default: 5. */
   countdownSeconds?: number;
+  /**
+   * Whether this modal is pausing or unpausing. Defaults to "pause".
+   * Drives the confirmation phrase and the action label.
+   */
+  action?: "pause" | "unpause";
+  /**
+   * Contract alias the operator must re-type as part of the high-contrast
+   * confirmation barrier (e.g. "orchestrator", "payment", "escrow").
+   * Defaults to the pause scope when not supplied.
+   */
+  contractAlias?: string;
+  /**
+   * Structured incident reason. When provided, the modal renders a
+   * two-step flow: (1) incident reason + post-mortem attestation hash,
+   * (2) network/alias confirmation barrier before signing.
+   */
+  incidentReason?: string;
+  /** 64-char lowercase hex post-mortem attestation hash. */
+  postMortemAttestationHash?: string;
+  /** Called with the collected structured incident payload on confirm. */
+  onConfirmWithIncident?: (payload: EmergencyIncidentPayload) => void;
+}
+
+/** Structured incident payload collected by the two-step emergency flow. */
+export interface EmergencyIncidentPayload {
+  action: "pause" | "unpause";
+  network: Network;
+  pauseScope: EmergencyPauseModalProps["pauseScope"];
+  contractAlias: string;
+  incidentReason: string;
+  postMortemAttestationHash: string;
+  justification: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,8 +118,7 @@ function useFocusTrap(ref: React.RefObject<HTMLElement>, active: boolean) {
   useEffect(() => {
     if (!active || !ref.current) return;
     const el = ref.current;
-    const sel =
-      'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const sel = 'button:not([disabled]), [href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
     const nodes = Array.from(el.querySelectorAll<HTMLElement>(sel));
     if (!nodes.length) return;
     const first = nodes[0];
@@ -108,15 +126,9 @@ function useFocusTrap(ref: React.RefObject<HTMLElement>, active: boolean) {
     function trap(e: KeyboardEvent) {
       if (e.key !== "Tab") return;
       if (e.shiftKey) {
-        if (document.activeElement === first) {
-          e.preventDefault();
-          last.focus();
-        }
+        if (document.activeElement === first) { e.preventDefault(); last.focus(); }
       } else {
-        if (document.activeElement === last) {
-          e.preventDefault();
-          first.focus();
-        }
+        if (document.activeElement === last) { e.preventDefault(); first.focus(); }
       }
     }
     el.addEventListener("keydown", trap);
@@ -143,100 +155,35 @@ function formatHash(hex: string): string[][] {
   return rows;
 }
 
-/**
- * Returns an array of React spans highlighting per-character differences
- * between oldStr and newStr.
- */
-function diffChars(
-  str: string,
-  other: string,
-  mode: "old" | "new",
-  changedBg: string,
-  unchangedColor: string
-): React.ReactNode[] {
-  return str.split("").map((ch, i) => {
-    const differs = ch !== (other[i] ?? "");
-    return (
-      <span
-        key={i}
-        style={{
-          background: differs ? changedBg : "transparent",
-          color: unchangedColor,
-          fontFamily: "monospace",
-        }}
-      >
-        {ch}
-      </span>
-    );
-  });
-}
-
-/** Groups an address/hash string into space-separated 4-char chunks. */
-function groupedDisplay(
-  str: string,
-  other: string,
-  mode: "old" | "new",
-  dark: boolean
-): React.ReactNode {
+/** Groups an address/hash value with per-block difference highlighting. */
+function groupedDisplay(str: string, other: string, mode: "old" | "new", dark: boolean): React.ReactNode {
   const changedBg = mode === "old"
     ? (dark ? "#7F1D1D" : "#FEE2E2")
     : (dark ? "#14532D" : "#DCFCE7");
   const color = dark ? "#F9FAFB" : "#111827";
-  // Split into 4-char groups
   const groups: React.ReactNode[] = [];
   for (let i = 0; i < str.length; i += 4) {
     const chunk = str.slice(i, i + 4);
     const otherChunk = other.slice(i, i + 4);
     const differs = chunk !== otherChunk;
     groups.push(
-      <span
-        key={i}
-        style={{
-          background: differs ? changedBg : "transparent",
-          color,
-          fontFamily: "monospace",
-          marginRight: 4,
-        }}
-      >
+      <span key={i} style={{ background: differs ? changedBg : "transparent", color, fontFamily: "monospace", marginInlineEnd: 4 }}>
         {chunk}
       </span>
     );
   }
-  return <>{groups}</>;
+  // Wrap in dir="ltr" isolate so hex never reorders in RTL
+  return <span dir="ltr" style={{ unicodeBidi: "isolate" }}>{groups}</span>;
 }
 
 // ---------------------------------------------------------------------------
 // Environment Banner
 // ---------------------------------------------------------------------------
 
-const NETWORK_CONFIG: Record<
-  Network,
-  { hairline: string; bg: string; pillBg: string; pillText: string; label: string; body: string }
-> = {
-  mainnet: {
-    hairline: "#EF4444",
-    bg: "#7F1D1D",
-    pillBg: "#EF4444",
-    pillText: "#FFFFFF",
-    label: "MAINNET",
-    body: "You are operating on the live Stellar Mainnet. All actions are irreversible.",
-  },
-  testnet: {
-    hairline: "#6366F1",
-    bg: "#1E1B4B",
-    pillBg: "#6366F1",
-    pillText: "#FFFFFF",
-    label: "TESTNET",
-    body: "You are on Testnet. No real funds or contracts are affected.",
-  },
-  localnet: {
-    hairline: "#64748B",
-    bg: "#1E293B",
-    pillBg: "#64748B",
-    pillText: "#FFFFFF",
-    label: "LOCALNET",
-    body: "Local development environment.",
-  },
+const NETWORK_CONFIG: Record<Network, { hairline: string; bg: string; pillBg: string; pillText: string; label: string; body: string }> = {
+  mainnet:  { hairline: "#EF4444", bg: "#7F1D1D", pillBg: "#EF4444", pillText: "#FFFFFF", label: "MAINNET",  body: "You are operating on the live Stellar Mainnet. All actions are irreversible." },
+  testnet:  { hairline: "#6366F1", bg: "#1E1B4B", pillBg: "#6366F1", pillText: "#FFFFFF", label: "TESTNET",  body: "You are on Testnet. No real funds or contracts are affected." },
+  localnet: { hairline: "#64748B", bg: "#1E293B", pillBg: "#64748B", pillText: "#FFFFFF", label: "LOCALNET", body: "Local development environment." },
 };
 
 export function EnvironmentBanner({ network }: EnvironmentBannerProps) {
@@ -253,52 +200,27 @@ export function EnvironmentBanner({ network }: EnvironmentBannerProps) {
       onBlur={() => setExpanded(false)}
       tabIndex={0}
       style={{
-        position: "sticky",
-        top: 0,
-        zIndex: 10000,
-        width: "100%",
+        position: "sticky", top: 0, zIndex: 10000, width: "100%",
         background: cfg.bg,
-        borderTop: `3px solid ${cfg.hairline}`,
+        borderBlockStart: `3px solid ${cfg.hairline}`,
         height: expanded ? 32 : 8,
         overflow: "hidden",
         transition: "height 0.2s ease",
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        paddingLeft: expanded ? 12 : 0,
+        display: "flex", alignItems: "center", gap: 10,
+        paddingInlineStart: expanded ? 12 : 0,
         cursor: "default",
       }}
     >
       {expanded && (
         <>
-          <span
-            style={{
-              background: cfg.pillBg,
-              color: cfg.pillText,
-              fontSize: 10,
-              fontWeight: 700,
-              letterSpacing: "0.1em",
-              padding: "1px 7px",
-              borderRadius: 4,
-              whiteSpace: "nowrap",
-            }}
-          >
+          <span style={{ background: cfg.pillBg, color: cfg.pillText, fontSize: 10, fontWeight: 700, letterSpacing: "0.1em", paddingBlock: 1, paddingInline: 7, borderRadius: 4, whiteSpace: "nowrap" }}>
             {cfg.label}
           </span>
           <span style={{ fontSize: 12, color: "rgba(255,255,255,0.75)", whiteSpace: "nowrap" }}>
             {cfg.body}
           </span>
           {network === "mainnet" && (
-            <span
-              aria-hidden="true"
-              style={{
-                marginLeft: "auto",
-                marginRight: 12,
-                fontSize: 11,
-                color: "#FCA5A5",
-                fontWeight: 600,
-              }}
-            >
+            <span aria-hidden="true" style={{ marginInlineStart: "auto", marginInlineEnd: 12, fontSize: 11, color: "#FCA5A5", fontWeight: 600 }}>
               ⚠ Live network
             </span>
           )}
@@ -332,77 +254,30 @@ function ModalShell({ titleId, title, tier, dark, onClose, children, modalRef }:
 
   return (
     <>
-      {/* Backdrop */}
-      <div
-        aria-hidden="true"
-        onClick={onClose}
-        style={{
-          position: "fixed", inset: 0,
-          background: dark ? "rgba(0,0,0,0.65)" : "rgba(0,0,0,0.45)",
-          zIndex: 9998,
-        }}
-      />
-      {/* Dialog */}
+      <div aria-hidden="true" onClick={onClose}
+        style={{ position: "fixed", inset: 0, background: dark ? "rgba(0,0,0,0.65)" : "rgba(0,0,0,0.45)", zIndex: 9998 }} />
       <div
         ref={modalRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
+        role="dialog" aria-modal="true" aria-labelledby={titleId}
         style={{
-          position: "fixed",
-          top: "50%", left: "50%",
-          transform: "translate(-50%, -50%)",
-          zIndex: 9999,
-          width: "min(600px, 95vw)",
-          maxHeight: "90vh",
-          overflowY: "auto",
-          background: bg,
-          border: `1px solid ${border}`,
-          borderRadius: 10,
+          position: "fixed", top: "50%", left: "50%", transform: "translate(-50%, -50%)",
+          zIndex: 9999, width: "min(600px, 95vw)", maxHeight: "90vh", overflowY: "auto",
+          background: bg, border: `1px solid ${border}`, borderRadius: 10,
           boxShadow: "0 24px 64px rgba(0,0,0,0.3)",
         }}
       >
         {/* Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "14px 20px",
-            background: headerBg,
-            borderBottom: `1px solid ${headerBorder}`,
-          }}
-        >
-          <h2
-            id={titleId}
-            style={{
-              margin: 0,
-              fontSize: 15,
-              fontWeight: 700,
-              color: isHigh ? (dark ? "#FCA5A5" : "#7F1D1D") : textPrimary,
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-            }}
-          >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", paddingBlock: 14, paddingInline: 20, background: headerBg, borderBlockEnd: `1px solid ${headerBorder}` }}>
+          <h2 id={titleId} style={{ margin: 0, fontSize: 15, fontWeight: 700, color: isHigh ? (dark ? "#FCA5A5" : "#7F1D1D") : textPrimary, display: "flex", alignItems: "center", gap: 8 }}>
             {isHigh && <span aria-hidden="true">⚠</span>}
             {title}
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Cancel and close"
-            style={{
-              background: "none", border: "none", cursor: "pointer",
-              color: dark ? "#9CA3AF" : "#6B7280",
-              fontSize: 20, lineHeight: 1, padding: "2px 6px",
-            }}
-          >
+          <button type="button" onClick={onClose} aria-label="Cancel and close"
+            style={{ background: "none", border: "none", cursor: "pointer", color: dark ? "#9CA3AF" : "#6B7280", fontSize: 20, lineHeight: 1, paddingBlock: 2, paddingInline: 6 }}>
             ×
           </button>
         </div>
-        {/* Body */}
-        <div style={{ padding: "20px" }}>{children}</div>
+        <div style={{ paddingBlock: 20, paddingInline: 20 }}>{children}</div>
       </div>
     </>
   );
@@ -412,10 +287,7 @@ function ModalShell({ titleId, title, tier, dark, onClose, children, modalRef }:
 // Diff Table
 // ---------------------------------------------------------------------------
 
-interface DiffTableProps {
-  diff: DiffField[];
-  dark: boolean;
-}
+interface DiffTableProps { diff: DiffField[]; dark: boolean; }
 
 function DiffTable({ diff, dark }: DiffTableProps) {
   const [showAll, setShowAll] = useState(false);
@@ -427,55 +299,17 @@ function DiffTable({ diff, dark }: DiffTableProps) {
   const visible = showAll ? diff : diff.filter((f) => !f.unchanged);
   const hiddenCount = diff.filter((f) => f.unchanged).length;
 
-  function rowStyle(f: DiffField): React.CSSProperties {
-    if (f.unchanged) return { opacity: 0.5 };
-    if (f.oldValue === "") return { background: dark ? "#14532D22" : "#DCFCE788" };
-    if (f.newValue === "") return { background: dark ? "#7F1D1D22" : "#FEE2E288" };
-    return {};
-  }
-
-  function oldColor(f: DiffField): string {
-    if (f.oldValue === f.newValue) return textMuted;
-    return dark ? "#FCA5A5" : "#DC2626";
-  }
-  function newColor(f: DiffField): string {
-    if (f.oldValue === f.newValue) return textMuted;
-    return dark ? "#86EFAC" : "#16A34A";
-  }
-
-  // Decide if a value looks like an address/hash (long, hex-ish)
+  function oldColor(f: DiffField) { return f.oldValue === f.newValue ? textMuted : (dark ? "#FCA5A5" : "#DC2626"); }
+  function newColor(f: DiffField) { return f.oldValue === f.newValue ? textMuted : (dark ? "#86EFAC" : "#16A34A"); }
   function isLong(v: string) { return v.length > 20; }
 
   return (
-    <div style={{ marginBottom: 16 }}>
-      <table
-        role="table"
-        style={{
-          width: "100%",
-          borderCollapse: "collapse",
-          fontSize: 13,
-          border: `1px solid ${border}`,
-          borderRadius: 6,
-          overflow: "hidden",
-        }}
-      >
+    <div style={{ marginBlockEnd: 16 }}>
+      <table role="table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, border: `1px solid ${border}`, borderRadius: 6, overflow: "hidden" }}>
         <thead>
           <tr style={{ background: headerBg }}>
             {["Parameter", "Old Value", "New Value"].map((h) => (
-              <th
-                key={h}
-                scope="col"
-                style={{
-                  padding: "8px 12px",
-                  textAlign: "left",
-                  fontWeight: 600,
-                  color: textMuted,
-                  fontSize: 11,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.06em",
-                  borderBottom: `1px solid ${border}`,
-                }}
-              >
+              <th key={h} scope="col" style={{ paddingBlock: 8, paddingInline: 12, textAlign: "start", fontWeight: 600, color: textMuted, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", borderBlockEnd: `1px solid ${border}` }}>
                 {h}
               </th>
             ))}
@@ -483,45 +317,21 @@ function DiffTable({ diff, dark }: DiffTableProps) {
         </thead>
         <tbody>
           {visible.map((f, i) => (
-            <tr
-              key={i}
-              style={{
-                borderBottom: `1px solid ${border}`,
-                ...rowStyle(f),
-              }}
-            >
-              <td style={{ padding: "8px 12px", color: textPrimary, fontWeight: 500 }}>
-                {f.label}
+            <tr key={i} style={{ borderBlockEnd: `1px solid ${border}`, opacity: f.unchanged ? 0.5 : 1 }}>
+              <td style={{ paddingBlock: 8, paddingInline: 12, color: textPrimary, fontWeight: 500 }}>{f.label}</td>
+              <td style={{ paddingBlock: 8, paddingInline: 12, color: oldColor(f) }}>
+                {isLong(f.oldValue) ? groupedDisplay(f.oldValue, f.newValue, "old", dark) : <span dir="ltr" style={{ unicodeBidi: "isolate", fontFamily: "monospace" }}>{f.oldValue || "—"}</span>}
               </td>
-              <td style={{ padding: "8px 12px", color: oldColor(f) }}>
-                {isLong(f.oldValue)
-                  ? groupedDisplay(f.oldValue, f.newValue, "old", dark)
-                  : <span style={{ fontFamily: "monospace" }}>{f.oldValue || "—"}</span>}
-              </td>
-              <td style={{ padding: "8px 12px", color: newColor(f) }}>
-                {isLong(f.newValue)
-                  ? groupedDisplay(f.newValue, f.oldValue, "new", dark)
-                  : <span style={{ fontFamily: "monospace" }}>{f.newValue || "—"}</span>}
+              <td style={{ paddingBlock: 8, paddingInline: 12, color: newColor(f) }}>
+                {isLong(f.newValue) ? groupedDisplay(f.newValue, f.oldValue, "new", dark) : <span dir="ltr" style={{ unicodeBidi: "isolate", fontFamily: "monospace" }}>{f.newValue || "—"}</span>}
               </td>
             </tr>
           ))}
         </tbody>
       </table>
       {hiddenCount > 0 && (
-        <button
-          type="button"
-          onClick={() => setShowAll((s) => !s)}
-          style={{
-            marginTop: 6,
-            background: "none",
-            border: "none",
-            cursor: "pointer",
-            fontSize: 12,
-            color: dark ? "#60A5FA" : "#2563EB",
-            textDecoration: "underline",
-            padding: 0,
-          }}
-        >
+        <button type="button" onClick={() => setShowAll((s) => !s)}
+          style={{ marginBlockStart: 6, background: "none", border: "none", cursor: "pointer", fontSize: 12, color: dark ? "#60A5FA" : "#2563EB", textDecoration: "underline", padding: 0 }}>
           {showAll ? "Hide unchanged fields" : `Show ${hiddenCount} unchanged field${hiddenCount > 1 ? "s" : ""}`}
         </button>
       )}
@@ -545,58 +355,24 @@ function ChecksumBadge({ expected, verified, dark, confirmBadgeId }: ChecksumBad
   const border = dark ? "#374151" : "#E5E7EB";
   const codeBg = dark ? "#111827" : "#F9FAFB";
   const codeColor = dark ? "#D1D5DB" : "#374151";
-
-  const badgeColor =
-    verified === "pending"
-      ? dark ? "#FEF08A" : "#CA8A04"
-      : verified
-      ? dark ? "#86EFAC" : "#16A34A"
-      : dark ? "#FCA5A5" : "#DC2626";
-
-  const badgeLabel =
-    verified === "pending"
-      ? "Verifying…"
-      : verified
-      ? "✓ Hash matches uploaded WASM artifact"
-      : "✗ Hash mismatch — do not proceed";
+  const badgeColor = verified === "pending" ? (dark ? "#FEF08A" : "#CA8A04") : verified ? (dark ? "#86EFAC" : "#16A34A") : (dark ? "#FCA5A5" : "#DC2626");
+  const badgeLabel = verified === "pending" ? "Verifying…" : verified ? "✓ Hash matches uploaded WASM artifact" : "✗ Hash mismatch — do not proceed";
 
   return (
-    <div style={{ marginBottom: 16 }}>
-      <div style={{ fontSize: 12, fontWeight: 600, color: dark ? "#9CA3AF" : "#6B7280", marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+    <div style={{ marginBlockEnd: 16 }}>
+      <div style={{ fontSize: 12, fontWeight: 600, color: dark ? "#9CA3AF" : "#6B7280", marginBlockEnd: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
         WASM Checksum Verification
       </div>
-      <div
-        style={{
-          background: codeBg,
-          border: `1px solid ${border}`,
-          borderRadius: 6,
-          padding: "10px 14px",
-          marginBottom: 8,
-        }}
-      >
+      {/* Hash is always LTR — wrap in dir="ltr" isolate */}
+      <div dir="ltr" style={{ unicodeBidi: "isolate", background: codeBg, border: `1px solid ${border}`, borderRadius: 6, paddingBlock: 10, paddingInline: 14, marginBlockEnd: 8 }}>
         {rows.map((row, ri) => (
-          <div key={ri} style={{ fontFamily: "monospace", fontSize: 12, color: codeColor, marginBottom: ri < rows.length - 1 ? 4 : 0 }}>
-            {row.map((group, gi) => (
-              <span key={gi} style={{ marginRight: 8 }}>{group}</span>
-            ))}
+          <div key={ri} style={{ fontFamily: "monospace", fontSize: 12, color: codeColor, marginBlockEnd: ri < rows.length - 1 ? 4 : 0 }}>
+            {row.map((group, gi) => <span key={gi} style={{ marginInlineEnd: 8 }}>{group}</span>)}
           </div>
         ))}
       </div>
-      <span
-        id={confirmBadgeId}
-        aria-label={badgeLabel}
-        style={{
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 6,
-          fontSize: 12,
-          fontWeight: 600,
-          color: badgeColor,
-        }}
-      >
-        {verified === "pending" ? (
-          <span style={{ display: "inline-block", width: 10, height: 10, border: `2px solid ${badgeColor}`, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
-        ) : null}
+      <span id={confirmBadgeId} aria-label={badgeLabel} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: badgeColor }}>
+        {verified === "pending" && <span style={{ display: "inline-block", width: 10, height: 10, border: `2px solid ${badgeColor}`, borderBlockStartColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />}
         {badgeLabel}
       </span>
     </div>
@@ -620,72 +396,36 @@ function ConfirmButton({ disabled, viewerRole, label, dark, onClick, disabledRea
   const isAuditor = viewerRole === "auditor";
   const [showTip, setShowTip] = useState(false);
   const isDisabled = disabled || isAuditor;
-
-  const reason = isAuditor
-    ? "You have view-only access on this network"
-    : "Complete all required fields to enable";
+  const reason = isAuditor ? "You have view-only access on this network" : "Complete all required fields to enable";
 
   return (
-    <span
-      style={{ position: "relative", display: "inline-block" }}
-      onMouseEnter={() => setShowTip(true)}
-      onMouseLeave={() => setShowTip(false)}
-    >
+    <span style={{ position: "relative", display: "inline-block" }}
+      onMouseEnter={() => setShowTip(true)} onMouseLeave={() => setShowTip(false)}>
       <button
-        type="button"
-        aria-disabled={isDisabled}
-        aria-describedby={isDisabled ? disabledReasonId : undefined}
+        type="button" aria-disabled={isDisabled} aria-describedby={isDisabled ? disabledReasonId : undefined}
         onClick={isDisabled ? undefined : onClick}
         style={{
-          padding: "10px 22px",
-          background: isDisabled
-            ? (dark ? "#374151" : "#D1D5DB")
-            : (dark ? "#16A34A" : "#15803D"),
+          paddingBlock: 10, paddingInline: 22,
+          background: isDisabled ? (dark ? "#374151" : "#D1D5DB") : (dark ? "#16A34A" : "#15803D"),
           color: isDisabled ? (dark ? "#6B7280" : "#9CA3AF") : "#FFFFFF",
-          border: "none",
-          borderRadius: 6,
-          fontSize: 14,
-          fontWeight: 600,
-          cursor: isDisabled ? "not-allowed" : "pointer",
-          opacity: isDisabled ? 0.45 : 1,
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
+          border: "none", borderRadius: 6, fontSize: 14, fontWeight: 600,
+          cursor: isDisabled ? "not-allowed" : "pointer", opacity: isDisabled ? 0.45 : 1,
+          display: "flex", alignItems: "center", gap: 6,
         }}
       >
         {isAuditor && <span aria-hidden="true">🔒</span>}
         {label}
       </button>
-      {/* Hidden description for screen readers */}
-      <span
-        id={disabledReasonId}
-        style={{
-          position: "absolute", width: 1, height: 1,
-          overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap",
-        }}
-      >
+      <span id={disabledReasonId} style={{ position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0,0,0,0)", whiteSpace: "nowrap" }}>
         {reason}
       </span>
-      {/* Visible tooltip */}
       {showTip && isDisabled && (
-        <span
-          role="tooltip"
-          style={{
-            position: "absolute",
-            bottom: "calc(100% + 6px)",
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "#1F2937",
-            color: "#F9FAFB",
-            fontSize: 12,
-            padding: "5px 10px",
-            borderRadius: 4,
-            whiteSpace: "nowrap",
-            zIndex: 10001,
-            pointerEvents: "none",
-            boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
-          }}
-        >
+        <span role="tooltip" style={{
+          position: "absolute", bottom: "calc(100% + 6px)", left: "50%", transform: "translateX(-50%)",
+          background: "#1F2937", color: "#F9FAFB", fontSize: 12, paddingBlock: 5, paddingInline: 10,
+          borderRadius: 4, whiteSpace: "nowrap", zIndex: 10001, pointerEvents: "none",
+          boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
+        }}>
           {reason}
         </span>
       )}
@@ -698,14 +438,8 @@ function ConfirmButton({ disabled, viewerRole, label, dark, onClick, disabledRea
 // ---------------------------------------------------------------------------
 
 export function StandardActionModal({
-  open,
-  title,
-  diff,
-  signerAddress,
-  multisigDescription,
-  viewerRole = "signer",
-  onConfirm,
-  onCancel,
+  open, title, diff, signerAddress, multisigDescription,
+  viewerRole = "signer", onConfirm, onCancel,
 }: StandardActionModalProps) {
   const dark = usePrefersDark();
   const modalRef = useRef<HTMLDivElement>(null);
@@ -715,53 +449,26 @@ export function StandardActionModal({
 
   useFocusTrap(modalRef, open);
   useEscapeKey(onCancel, open);
-
   if (!open) return null;
 
   return (
-    <ModalShell
-      titleId={titleId}
-      title={`Confirm: ${title}`}
-      tier="standard"
-      dark={dark}
-      onClose={onCancel}
-      modalRef={modalRef}
-    >
-      <p style={{ margin: "0 0 14px", fontSize: 13, color: textMuted }}>
-        Review the change carefully before confirming.
-      </p>
+    <ModalShell titleId={titleId} title={`Confirm: ${title}`} tier="standard" dark={dark} onClose={onCancel} modalRef={modalRef}>
+      <p style={{ margin: "0 0 14px", fontSize: 13, color: textMuted }}>Review the change carefully before confirming.</p>
       <DiffTable diff={diff} dark={dark} />
       {(signerAddress || multisigDescription) && (
-        <p style={{ margin: "0 0 20px", fontSize: 12, color: textMuted, fontFamily: "monospace" }}>
-          {signerAddress && <>Signing address: {signerAddress}</>}
+        <p style={{ margin: "0 0 20px", fontSize: 12, color: textMuted }}>
+          {/* Signing address is always LTR — bidi-isolate */}
+          {signerAddress && <>Signing address: <span dir="ltr" style={{ unicodeBidi: "isolate", fontFamily: "monospace" }}>{signerAddress}</span></>}
           {signerAddress && multisigDescription && " · "}
           {multisigDescription}
         </p>
       )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <button
-          type="button"
-          onClick={onCancel}
-          style={{
-            padding: "9px 18px",
-            background: "none",
-            border: `1px solid ${dark ? "#374151" : "#D1D5DB"}`,
-            borderRadius: 6,
-            fontSize: 13,
-            color: dark ? "#D1D5DB" : "#374151",
-            cursor: "pointer",
-          }}
-        >
+        <button type="button" onClick={onCancel}
+          style={{ paddingBlock: 9, paddingInline: 18, background: "none", border: `1px solid ${dark ? "#374151" : "#D1D5DB"}`, borderRadius: 6, fontSize: 13, color: dark ? "#D1D5DB" : "#374151", cursor: "pointer" }}>
           Cancel
         </button>
-        <ConfirmButton
-          disabled={false}
-          viewerRole={viewerRole}
-          label="Confirm Change →"
-          dark={dark}
-          onClick={onConfirm}
-          disabledReasonId={disabledReasonId}
-        />
+        <ConfirmButton disabled={false} viewerRole={viewerRole} label="Confirm Change →" dark={dark} onClick={onConfirm} disabledReasonId={disabledReasonId} />
       </div>
     </ModalShell>
   );
@@ -772,17 +479,8 @@ export function StandardActionModal({
 // ---------------------------------------------------------------------------
 
 export function HighImpactActionModal({
-  open,
-  title,
-  diff,
-  signerAddress,
-  multisigDescription,
-  viewerRole = "signer",
-  confirmationPhrase,
-  wasmChecksumExpected,
-  wasmChecksumVerified,
-  onConfirm,
-  onCancel,
+  open, title, diff, signerAddress, multisigDescription, viewerRole = "signer",
+  confirmationPhrase, wasmChecksumExpected, wasmChecksumVerified, onConfirm, onCancel,
 }: HighImpactActionModalProps) {
   const dark = usePrefersDark();
   const modalRef = useRef<HTMLDivElement>(null);
@@ -801,9 +499,7 @@ export function HighImpactActionModal({
   useFocusTrap(modalRef, open);
   useEscapeKey(onCancel, open);
 
-  // Guard evaluations
-  const checksumOk =
-    !wasmChecksumExpected || wasmChecksumVerified === true;
+  const checksumOk = !wasmChecksumExpected || wasmChecksumVerified === true;
   const phraseOk = phraseInput === confirmationPhrase;
   const justificationOk = justification.trim().length >= 20;
   const allGuardsPassed = checksumOk && phraseOk && justificationOk;
@@ -811,150 +507,112 @@ export function HighImpactActionModal({
   if (!open) return null;
 
   return (
-    <ModalShell
-      titleId={titleId}
-      title={`HIGH-IMPACT ACTION — ${title}`}
-      tier="high-impact"
-      dark={dark}
-      onClose={onCancel}
-      modalRef={modalRef}
-    >
+    <ModalShell titleId={titleId} title={`HIGH-IMPACT ACTION — ${title}`} tier="high-impact" dark={dark} onClose={onCancel} modalRef={modalRef}>
       <DiffTable diff={diff} dark={dark} />
 
-      {/* Checksum guard */}
       {wasmChecksumExpected && wasmChecksumVerified !== undefined && (
-        <ChecksumBadge
-          expected={wasmChecksumExpected}
-          verified={wasmChecksumVerified}
-          dark={dark}
-          confirmBadgeId={checksumBadgeId}
-        />
+        <ChecksumBadge expected={wasmChecksumExpected} verified={wasmChecksumVerified} dark={dark} confirmBadgeId={checksumBadgeId} />
       )}
 
-      {/* Typed phrase guard */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-          Typed Confirmation
-        </div>
+      {/* Typed phrase */}
+      <div style={{ marginBlockEnd: 16 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBlockEnd: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Typed Confirmation</div>
         <p id={phraseDescId} style={{ margin: "0 0 6px", fontSize: 13, color: textPrimary }}>
           Type{" "}
-          <code
-            style={{
-              background: dark ? "#111827" : "#F3F4F6",
-              border: `1px solid ${border}`,
-              padding: "2px 6px",
-              borderRadius: 4,
-              fontFamily: "monospace",
-              fontSize: 13,
-              letterSpacing: "0.08em",
-              userSelect: "all",
-            }}
-          >
+          <code style={{ background: dark ? "#111827" : "#F3F4F6", border: `1px solid ${border}`, paddingBlock: 2, paddingInline: 6, borderRadius: 4, fontFamily: "monospace", fontSize: 13, letterSpacing: "0.08em", userSelect: "all" }}>
             {confirmationPhrase}
           </code>{" "}
           to confirm:
         </p>
         <input
-          type="text"
-          aria-label="Type the confirmation phrase"
-          aria-describedby={phraseDescId}
-          value={phraseInput}
-          onChange={(e) => setPhraseInput(e.target.value)}
-          autoComplete="off"
-          autoCorrect="off"
-          spellCheck={false}
-          style={{
-            width: "100%",
-            padding: "9px 12px",
-            background: inputBg,
-            border: `1px solid ${phraseInput && !phraseOk ? "#EF4444" : phraseOk ? "#22C55E" : border}`,
-            borderRadius: 6,
-            fontSize: 13,
-            fontFamily: "monospace",
-            color: textPrimary,
-            outline: "none",
-            boxSizing: "border-box",
-          }}
+          type="text" aria-label="Type the confirmation phrase" aria-describedby={phraseDescId}
+          value={phraseInput} onChange={(e) => setPhraseInput(e.target.value)}
+          autoComplete="off" autoCorrect="off" spellCheck={false}
+          style={{ width: "100%", paddingBlock: 9, paddingInline: 12, background: inputBg, border: `1px solid ${phraseInput && !phraseOk ? "#EF4444" : phraseOk ? "#22C55E" : border}`, borderRadius: 6, fontSize: 13, fontFamily: "monospace", color: textPrimary, outline: "none", boxSizing: "border-box" }}
           placeholder={`Type: ${confirmationPhrase}`}
         />
       </div>
 
-      {/* Justification guard */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-          Incident Justification (required)
-        </div>
-        <p style={{ margin: "0 0 6px", fontSize: 11, color: textMuted }}>
-          This text will be recorded in the audit log.
-        </p>
+      {/* Justification */}
+      <div style={{ marginBlockEnd: 20 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBlockEnd: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Incident Justification (required)</div>
+        <p style={{ margin: "0 0 6px", fontSize: 11, color: textMuted }}>This text will be recorded in the audit log.</p>
         <textarea
-          aria-label="Incident justification"
-          value={justification}
-          onChange={(e) => setJustification(e.target.value)}
-          rows={3}
-          placeholder="Post-mortem ticket, incident ID, or brief justification…"
-          style={{
-            width: "100%",
-            padding: "9px 12px",
-            background: inputBg,
-            border: `1px solid ${justification.trim().length > 0 && !justificationOk ? "#EAB308" : justificationOk ? "#22C55E" : border}`,
-            borderRadius: 6,
-            fontSize: 13,
-            color: textPrimary,
-            resize: "vertical",
-            boxSizing: "border-box",
-            outline: "none",
-          }}
+          aria-label="Incident justification" value={justification} onChange={(e) => setJustification(e.target.value)}
+          rows={3} placeholder="Post-mortem ticket, incident ID, or brief justification…"
+          style={{ width: "100%", paddingBlock: 9, paddingInline: 12, background: inputBg, border: `1px solid ${justification.trim().length > 0 && !justificationOk ? "#EAB308" : justificationOk ? "#22C55E" : border}`, borderRadius: 6, fontSize: 13, color: textPrimary, resize: "vertical", boxSizing: "border-box", outline: "none" }}
         />
-        <div style={{ textAlign: "right", fontSize: 11, color: textMuted, marginTop: 3 }}>
+        <div style={{ textAlign: "end", fontSize: 11, color: textMuted, marginBlockStart: 3 }}>
           {justification.trim().length} / 20 min characters
         </div>
       </div>
 
       {signerAddress && (
-        <p style={{ margin: "0 0 16px", fontSize: 12, color: textMuted, fontFamily: "monospace" }}>
-          Signing address: {signerAddress}
+        <p style={{ margin: "0 0 16px", fontSize: 12, color: textMuted }}>
+          Signing address:{" "}
+          <span dir="ltr" style={{ unicodeBidi: "isolate", fontFamily: "monospace" }}>{signerAddress}</span>
           {multisigDescription && ` · ${multisigDescription}`}
         </p>
       )}
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <button
-          type="button"
-          onClick={onCancel}
-          style={{
-            padding: "9px 18px",
-            background: "none",
-            border: `1px solid ${border}`,
-            borderRadius: 6,
-            fontSize: 13,
-            color: dark ? "#D1D5DB" : "#374151",
-            cursor: "pointer",
-          }}
-        >
+        <button type="button" onClick={onCancel}
+          style={{ paddingBlock: 9, paddingInline: 18, background: "none", border: `1px solid ${border}`, borderRadius: 6, fontSize: 13, color: dark ? "#D1D5DB" : "#374151", cursor: "pointer" }}>
           Cancel
         </button>
-        <ConfirmButton
-          disabled={!allGuardsPassed}
-          viewerRole={viewerRole}
-          label="I confirm — Execute →"
-          dark={dark}
-          onClick={onConfirm}
-          disabledReasonId={disabledReasonId}
-        />
+        <ConfirmButton disabled={!allGuardsPassed} viewerRole={viewerRole} label="I confirm — Execute →" dark={dark} onClick={onConfirm} disabledReasonId={disabledReasonId} />
       </div>
     </ModalShell>
   );
 }
 
 // ---------------------------------------------------------------------------
-// EmergencyPauseModal  (HighImpact + 5-second countdown)
+// EmergencyPauseModal
 // ---------------------------------------------------------------------------
 
-function pausePhrase(scope: EmergencyPauseModalProps["pauseScope"], network: Network): string {
+function pausePhrase(
+  scope: EmergencyPauseModalProps["pauseScope"],
+  network: Network,
+  action: "pause" | "unpause" = "pause"
+): string {
   const net = network === "mainnet" ? "MAINNET" : network === "testnet" ? "TESTNET" : "LOCALNET";
-  if (scope === "all") return `PAUSE ${net}`;
-  return `PAUSE ${scope.toUpperCase()}`;
+  return scope === "all" ? `PAUSE ${net}` : `PAUSE ${scope.toUpperCase()}`;
+}
+
+export function EmergencyPauseModal({
+  open, title = "Emergency Pause", diff, signerAddress, multisigDescription,
+  viewerRole = "signer", network, pauseScope, wasmChecksumExpected, wasmChecksumVerified,
+  countdownSeconds = 5, onConfirm, onCancel,
+  const verb = action === "unpause" ? "UNPAUSE" : "PAUSE";
+  if (scope === "all") return `${verb} ${net}`;
+  return `${verb} ${scope.toUpperCase()}`;
+}
+
+/** Network name the operator must re-type in the confirmation barrier. */
+export function networkConfirmationName(network: Network): string {
+  return network === "mainnet" ? "MAINNET" : network === "testnet" ? "TESTNET" : "LOCALNET";
+}
+
+/** Returns true when `input` is a valid 64-char lowercase hex SHA-256. */
+export function isValidAttestationHash(input: string): boolean {
+  return /^[0-9a-f]{64}$/.test(input);
+}
+
+/**
+ * Evaluates the high-contrast confirmation barrier. Both the network name and
+ * the contract alias must be re-typed exactly (case-sensitive) before the
+ * operator is allowed to sign a high-stakes transaction.
+ */
+export function isConfirmationBarrierSatisfied(params: {
+  networkInput: string;
+  aliasInput: string;
+  network: Network;
+  contractAlias: string;
+}): boolean {
+  return (
+    params.networkInput === networkConfirmationName(params.network) &&
+    params.aliasInput === params.contractAlias
+  );
 }
 
 export function EmergencyPauseModal({
@@ -969,7 +627,12 @@ export function EmergencyPauseModal({
   wasmChecksumExpected,
   wasmChecksumVerified,
   countdownSeconds = 5,
+  action = "pause",
+  contractAlias,
+  incidentReason: initialIncidentReason,
+  postMortemAttestationHash: initialAttestationHash,
   onConfirm,
+  onConfirmWithIncident,
   onCancel,
 }: EmergencyPauseModalProps) {
   const dark = usePrefersDark();
@@ -977,48 +640,84 @@ export function EmergencyPauseModal({
   const titleId = useId();
   const disabledReasonId = useId();
   const phraseDescId = useId();
+  const barrierDescId = useId();
 
   const [phraseInput, setPhraseInput] = useState("");
   const [justification, setJustification] = useState("");
   const [countingDown, setCountingDown] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(countdownSeconds);
 
+  // Two-step emergency flow state
+  const [step, setStep] = useState<1 | 2>(1);
+  const [incidentReason, setIncidentReason] = useState(initialIncidentReason ?? "");
+  const [attestationHash, setAttestationHash] = useState(initialAttestationHash ?? "");
+  const [networkInput, setNetworkInput] = useState("");
+  const [aliasInput, setAliasInput] = useState("");
+
   const textPrimary = dark ? "#F9FAFB" : "#111827";
   const textMuted = dark ? "#9CA3AF" : "#6B7280";
   const border = dark ? "#374151" : "#E5E7EB";
   const inputBg = dark ? "#111827" : "#F9FAFB";
 
-  const confirmationPhrase = pausePhrase(pauseScope, network);
+  const resolvedAlias =
+    contractAlias ?? (pauseScope === "all" ? "orchestrator" : pauseScope);
+  const confirmationPhrase = pausePhrase(pauseScope, network, action);
   const checksumOk = !wasmChecksumExpected || wasmChecksumVerified === true;
   const phraseOk = phraseInput === confirmationPhrase;
   const justificationOk = justification.trim().length >= 20;
-  const allGuardsPassed = checksumOk && phraseOk && justificationOk;
+  const incidentReasonOk = incidentReason.trim().length >= 20;
+  const attestationOk = isValidAttestationHash(attestationHash);
+  const barrierOk = isConfirmationBarrierSatisfied({
+    networkInput,
+    aliasInput,
+    network,
+    contractAlias: resolvedAlias,
+  });
+  const step1Ok = incidentReasonOk && attestationOk;
+  const allGuardsPassed =
+    checksumOk && phraseOk && justificationOk && step1Ok && barrierOk;
 
   useFocusTrap(modalRef, open);
   useEscapeKey(() => {
-    if (countingDown) {
-      setCountingDown(false);
-      setSecondsLeft(countdownSeconds);
-    } else {
-      onCancel();
-    }
+    if (countingDown) { setCountingDown(false); setSecondsLeft(countdownSeconds); }
+    else { onCancel(); }
   }, open);
 
-  // Countdown timer
   useEffect(() => {
     if (!countingDown) return;
+    if (secondsLeft <= 0) { setCountingDown(false); onConfirm(); return; }
     if (secondsLeft <= 0) {
       setCountingDown(false);
-      onConfirm();
+      handleFinalConfirm();
       return;
     }
     const t = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
     return () => clearTimeout(t);
-  }, [countingDown, secondsLeft, onConfirm]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [countingDown, secondsLeft]);
 
+  function buildIncidentPayload(): EmergencyIncidentPayload {
+    return {
+      action,
+      network,
+      pauseScope,
+      contractAlias: resolvedAlias,
+      incidentReason: incidentReason.trim(),
+      postMortemAttestationHash: attestationHash,
+      justification: justification.trim(),
+    };
+  }
+
+  function handleInitiateCountdown() { setSecondsLeft(countdownSeconds); setCountingDown(true); }
+  function handleAbort() { setCountingDown(false); setSecondsLeft(countdownSeconds); }
   function handleInitiateCountdown() {
     setSecondsLeft(countdownSeconds);
     setCountingDown(true);
+  }
+
+  function handleFinalConfirm() {
+    if (onConfirmWithIncident) onConfirmWithIncident(buildIncidentPayload());
+    onConfirm();
   }
 
   function handleAbort() {
@@ -1029,11 +728,14 @@ export function EmergencyPauseModal({
   if (!open) return null;
 
   const scopeLabel = pauseScope === "all" ? "All Contracts" : pauseScope.charAt(0).toUpperCase() + pauseScope.slice(1);
+  const actionLabel = action === "unpause" ? "Emergency Unpause" : "Emergency Pause";
+  const networkName = networkConfirmationName(network);
 
   return (
+    <ModalShell titleId={titleId} title={`Emergency Pause — ${scopeLabel}`} tier="emergency-pause" dark={dark} onClose={countingDown ? handleAbort : onCancel} modalRef={modalRef}>
     <ModalShell
       titleId={titleId}
-      title={`Emergency Pause — ${scopeLabel}`}
+      title={`${actionLabel} — ${scopeLabel}`}
       tier="emergency-pause"
       dark={dark}
       onClose={countingDown ? handleAbort : onCancel}
@@ -1041,61 +743,26 @@ export function EmergencyPauseModal({
     >
       {/* Countdown overlay */}
       {countingDown && (
-        <div
-          aria-live="assertive"
-          aria-atomic="true"
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-            padding: "24px 0",
-            gap: 16,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 80,
-              fontWeight: 900,
-              lineHeight: 1,
-              color: dark ? "#FCA5A5" : "#DC2626",
-              fontFamily: "monospace",
-              animation: "pulseFade 1s ease-in-out",
-            }}
-          >
+        <div aria-live="assertive" aria-atomic="true" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", paddingBlock: 24, gap: 16 }}>
+          <div style={{ fontSize: 80, fontWeight: 900, lineHeight: 1, color: dark ? "#FCA5A5" : "#DC2626", fontFamily: "monospace", animation: "pulseFade 1s ease-in-out" }}>
             {secondsLeft}
           </div>
           <p style={{ margin: 0, fontSize: 14, color: textPrimary, fontWeight: 600 }}>
-            Submitting pause transaction in {secondsLeft} second{secondsLeft !== 1 ? "s" : ""}…
+            Submitting {action} transaction in {secondsLeft} second{secondsLeft !== 1 ? "s" : ""}…
           </p>
-          <p style={{ margin: 0, fontSize: 12, color: textMuted }}>
-            Press Abort or Escape to cancel.
-          </p>
-          <button
-            type="button"
-            onClick={handleAbort}
-            autoFocus
-            style={{
-              marginTop: 8,
-              padding: "10px 32px",
-              background: dark ? "#7F1D1D" : "#FEF2F2",
-              border: `2px solid ${dark ? "#F87171" : "#EF4444"}`,
-              borderRadius: 8,
-              fontSize: 15,
-              fontWeight: 700,
-              color: dark ? "#FCA5A5" : "#DC2626",
-              cursor: "pointer",
-            }}
-          >
+          <p style={{ margin: 0, fontSize: 12, color: textMuted }}>Press Abort or Escape to cancel.</p>
+          <button type="button" onClick={handleAbort} autoFocus
+            style={{ marginBlockStart: 8, paddingBlock: 10, paddingInline: 32, background: dark ? "#7F1D1D" : "#FEF2F2", border: `2px solid ${dark ? "#F87171" : "#EF4444"}`, borderRadius: 8, fontSize: 15, fontWeight: 700, color: dark ? "#FCA5A5" : "#DC2626", cursor: "pointer" }}>
             Abort
           </button>
         </div>
       )}
 
-      {/* Normal modal content — hidden during countdown */}
       {!countingDown && (
         <>
           {network === "mainnet" && (
+            <div role="alert" style={{ marginBlockEnd: 14, paddingBlock: 10, paddingInline: 14, background: dark ? "#450A0A" : "#FEF2F2", border: `1px solid ${dark ? "#F87171" : "#EF4444"}`, borderRadius: 6, fontSize: 13, color: dark ? "#FEE2E2" : "#7F1D1D", fontWeight: 600 }}>
+              ⚠ You are about to pause {scopeLabel} on MAINNET. This will halt all affected transactions until manually resumed.
             <div
               role="alert"
               style={{
@@ -1109,129 +776,317 @@ export function EmergencyPauseModal({
                 fontWeight: 600,
               }}
             >
-              ⚠ You are about to pause {scopeLabel} on MAINNET. This will halt all affected transactions until manually resumed.
+              ⚠ You are about to {action} {scopeLabel} on MAINNET.{" "}
+              {action === "pause"
+                ? "This will halt all affected transactions until manually resumed."
+                : "This will resume processing of all affected transactions."}
             </div>
           )}
 
+          {/* Step indicator */}
+          <div
+            role="list"
+            aria-label="Emergency action steps"
+            style={{
+              display: "flex",
+              gap: 8,
+              marginBottom: 16,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: "0.06em",
+              textTransform: "uppercase",
+            }}
+          >
+            {[
+              { n: 1 as const, label: "Incident Attestation" },
+              { n: 2 as const, label: "Confirmation Barrier" },
+            ].map(({ n, label }) => {
+              const active = step === n;
+              const done = step > n;
+              return (
+                <div
+                  key={n}
+                  role="listitem"
+                  aria-current={active ? "step" : undefined}
+                  style={{
+                    flex: 1,
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: `1px solid ${active ? (dark ? "#F87171" : "#EF4444") : border}`,
+                    background: active
+                      ? dark ? "#450A0A" : "#FEF2F2"
+                      : done
+                      ? dark ? "#14532D" : "#DCFCE7"
+                      : "transparent",
+                    color: active
+                      ? dark ? "#FCA5A5" : "#7F1D1D"
+                      : done
+                      ? dark ? "#86EFAC" : "#166534"
+                      : textMuted,
+                  }}
+                >
+                  {done ? "✓ " : `${n}. `}
+                  {label}
+                </div>
+              );
+            })}
+          </div>
+
           <DiffTable diff={diff} dark={dark} />
 
-          {/* Typed phrase */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-              Typed Confirmation
-            </div>
-            <p id={phraseDescId} style={{ margin: "0 0 6px", fontSize: 13, color: textPrimary }}>
-              Type{" "}
-              <code
+          {/* Step 1: structured incident reason + post-mortem attestation hash */}
+          {step === 1 && (
+            <>
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  Structured Incident Reason (required)
+                </div>
+                <textarea
+                  aria-label="Structured incident reason"
+                  value={incidentReason}
+                  onChange={(e) => setIncidentReason(e.target.value)}
+                  rows={3}
+                  placeholder="Describe the incident: affected subsystem, observed impact, detection source…"
+                  style={{
+                    width: "100%",
+                    padding: "9px 12px",
+                    background: inputBg,
+                    border: `1px solid ${incidentReason.trim().length > 0 && !incidentReasonOk ? "#EAB308" : incidentReasonOk ? "#22C55E" : border}`,
+                    borderRadius: 6,
+                    fontSize: 13,
+                    color: textPrimary,
+                    resize: "vertical",
+                    boxSizing: "border-box",
+                    outline: "none",
+                  }}
+                />
+                <div style={{ textAlign: "right", fontSize: 11, color: textMuted, marginTop: 3 }}>
+                  {incidentReason.trim().length} / 20 min characters
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  Post-Mortem Attestation Hash (required)
+                </div>
+                <p style={{ margin: "0 0 6px", fontSize: 11, color: textMuted }}>
+                  SHA-256 of the signed post-mortem / incident attestation (64-char lowercase hex).
+                </p>
+                <input
+                  type="text"
+                  aria-label="Post-mortem attestation hash"
+                  value={attestationHash}
+                  onChange={(e) => setAttestationHash(e.target.value.trim())}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  placeholder="e.g. 3f9a… (64 hex chars)"
+                  style={{
+                    width: "100%",
+                    padding: "9px 12px",
+                    background: inputBg,
+                    border: `1px solid ${attestationHash && !attestationOk ? "#EF4444" : attestationOk ? "#22C55E" : border}`,
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontFamily: "monospace",
+                    color: textPrimary,
+                    outline: "none",
+                    boxSizing: "border-box",
+                  }}
+                />
+                {attestationHash && !attestationOk && (
+                  <div role="alert" style={{ marginTop: 4, fontSize: 11, color: dark ? "#FCA5A5" : "#DC2626" }}>
+                    Invalid hash — must be exactly 64 lowercase hex characters.
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  disabled={!step1Ok}
+                  aria-disabled={!step1Ok}
+                  onClick={() => setStep(2)}
+                  style={{
+                    padding: "9px 20px",
+                    background: step1Ok ? (dark ? "#1D4ED8" : "#2563EB") : (dark ? "#374151" : "#D1D5DB"),
+                    color: step1Ok ? "#FFFFFF" : (dark ? "#6B7280" : "#9CA3AF"),
+                    border: "none",
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontWeight: 600,
+                    cursor: step1Ok ? "pointer" : "not-allowed",
+                    opacity: step1Ok ? 1 : 0.6,
+                  }}
+                >
+                  Continue to Confirmation →
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Step 2: high-contrast confirmation barrier */}
+          {step === 2 && (
+            <div
+              role="group"
+              aria-labelledby={barrierDescId}
+              style={{
+                marginBottom: 20,
+                padding: "14px 16px",
+                border: `2px solid ${dark ? "#F87171" : "#DC2626"}`,
+                borderRadius: 8,
+                background: dark ? "#450A0A" : "#FEF2F2",
+              }}
+            >
+              <div
+                id={barrierDescId}
                 style={{
-                  background: dark ? "#111827" : "#F3F4F6",
-                  border: `1px solid ${border}`,
-                  padding: "2px 8px",
-                  borderRadius: 4,
-                  fontFamily: "monospace",
-                  fontSize: 13,
-                  letterSpacing: "0.1em",
-                  userSelect: "all",
+                  fontSize: 12,
+                  fontWeight: 800,
+                  letterSpacing: "0.08em",
+                  textTransform: "uppercase",
+                  color: dark ? "#FCA5A5" : "#7F1D1D",
+                  marginBottom: 10,
                 }}
               >
+                ⚠ High-Contrast Confirmation Barrier
+              </div>
+              <p style={{ margin: "0 0 10px", fontSize: 12, color: dark ? "#FEE2E2" : "#7F1D1D" }}>
+                Re-type the target network name and contract alias exactly to unlock signing.
+              </p>
+
+              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: textMuted, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Network name (type <code style={{ fontFamily: "monospace" }}>{networkName}</code>)
+              </label>
+              <input
+                type="text"
+                aria-label="Re-type target network name"
+                value={networkInput}
+                onChange={(e) => setNetworkInput(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder={networkName}
+                style={{
+                  width: "100%",
+                  marginBottom: 10,
+                  padding: "9px 12px",
+                  background: inputBg,
+                  border: `1px solid ${networkInput && networkInput !== networkName ? "#EF4444" : networkInput === networkName ? "#22C55E" : border}`,
+                  borderRadius: 6,
+                  fontSize: 13,
+                  fontFamily: "monospace",
+                  letterSpacing: "0.08em",
+                  color: textPrimary,
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+
+              <label style={{ display: "block", fontSize: 11, fontWeight: 700, color: textMuted, marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                Contract alias (type <code style={{ fontFamily: "monospace" }}>{resolvedAlias}</code>)
+              </label>
+              <input
+                type="text"
+                aria-label="Re-type contract alias"
+                value={aliasInput}
+                onChange={(e) => setAliasInput(e.target.value)}
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder={resolvedAlias}
+                style={{
+                  width: "100%",
+                  padding: "9px 12px",
+                  background: inputBg,
+                  border: `1px solid ${aliasInput && aliasInput !== resolvedAlias ? "#EF4444" : aliasInput === resolvedAlias ? "#22C55E" : border}`,
+                  borderRadius: 6,
+                  fontSize: 13,
+                  fontFamily: "monospace",
+                  color: textPrimary,
+                  outline: "none",
+                  boxSizing: "border-box",
+                }}
+              />
+
+              <button
+                type="button"
+                onClick={() => setStep(1)}
+                style={{
+                  marginTop: 10,
+                  background: "none",
+                  border: "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  fontSize: 12,
+                  color: dark ? "#93C5FD" : "#2563EB",
+                  textDecoration: "underline",
+                }}
+              >
+                ← Back to incident attestation
+              </button>
+            </div>
+          )}
+
+          {/* Typed phrase */}
+          <div style={{ marginBlockEnd: 16 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBlockEnd: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Typed Confirmation</div>
+            <p id={phraseDescId} style={{ margin: "0 0 6px", fontSize: 13, color: textPrimary }}>
+              Type{" "}
+              <code style={{ background: dark ? "#111827" : "#F3F4F6", border: `1px solid ${border}`, paddingBlock: 2, paddingInline: 8, borderRadius: 4, fontFamily: "monospace", fontSize: 13, letterSpacing: "0.1em", userSelect: "all" }}>
                 {confirmationPhrase}
               </code>{" "}
               to continue:
             </p>
-            <input
-              type="text"
-              aria-label="Type the confirmation phrase"
-              aria-describedby={phraseDescId}
-              value={phraseInput}
-              onChange={(e) => setPhraseInput(e.target.value)}
-              autoComplete="off"
-              autoCorrect="off"
-              spellCheck={false}
-              style={{
-                width: "100%",
-                padding: "9px 12px",
-                background: inputBg,
-                border: `1px solid ${phraseInput && !phraseOk ? "#EF4444" : phraseOk ? "#22C55E" : border}`,
-                borderRadius: 6,
-                fontSize: 13,
-                fontFamily: "monospace",
-                letterSpacing: "0.08em",
-                color: textPrimary,
-                outline: "none",
-                boxSizing: "border-box",
-              }}
+            <input type="text" aria-label="Type the confirmation phrase" aria-describedby={phraseDescId}
+              value={phraseInput} onChange={(e) => setPhraseInput(e.target.value)}
+              autoComplete="off" autoCorrect="off" spellCheck={false}
+              style={{ width: "100%", paddingBlock: 9, paddingInline: 12, background: inputBg, border: `1px solid ${phraseInput && !phraseOk ? "#EF4444" : phraseOk ? "#22C55E" : border}`, borderRadius: 6, fontSize: 13, fontFamily: "monospace", letterSpacing: "0.08em", color: textPrimary, outline: "none", boxSizing: "border-box" }}
               placeholder={`Type: ${confirmationPhrase}`}
             />
           </div>
 
           {/* Justification */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-              Incident Justification (required)
-            </div>
-            <p style={{ margin: "0 0 6px", fontSize: 11, color: textMuted }}>
-              This text will be recorded in the audit log.
-            </p>
-            <textarea
-              aria-label="Incident justification"
-              value={justification}
-              onChange={(e) => setJustification(e.target.value)}
-              rows={3}
+          <div style={{ marginBlockEnd: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: textMuted, marginBlockEnd: 6, textTransform: "uppercase", letterSpacing: "0.06em" }}>Incident Justification (required)</div>
+            <p style={{ margin: "0 0 6px", fontSize: 11, color: textMuted }}>This text will be recorded in the audit log.</p>
+            <textarea aria-label="Incident justification" value={justification} onChange={(e) => setJustification(e.target.value)} rows={3}
               placeholder="Incident ID, post-mortem link, or brief description of the issue…"
-              style={{
-                width: "100%",
-                padding: "9px 12px",
-                background: inputBg,
-                border: `1px solid ${justification.trim().length > 0 && !justificationOk ? "#EAB308" : justificationOk ? "#22C55E" : border}`,
-                borderRadius: 6,
-                fontSize: 13,
-                color: textPrimary,
-                resize: "vertical",
-                boxSizing: "border-box",
-                outline: "none",
-              }}
+              style={{ width: "100%", paddingBlock: 9, paddingInline: 12, background: inputBg, border: `1px solid ${justification.trim().length > 0 && !justificationOk ? "#EAB308" : justificationOk ? "#22C55E" : border}`, borderRadius: 6, fontSize: 13, color: textPrimary, resize: "vertical", boxSizing: "border-box", outline: "none" }}
             />
-            <div style={{ textAlign: "right", fontSize: 11, color: textMuted, marginTop: 3 }}>
+            <div style={{ textAlign: "end", fontSize: 11, color: textMuted, marginBlockStart: 3 }}>
               {justification.trim().length} / 20 min characters
             </div>
           </div>
 
           {signerAddress && (
-            <p style={{ margin: "0 0 16px", fontSize: 12, color: textMuted, fontFamily: "monospace" }}>
-              Signing address: {signerAddress}
+            <p style={{ margin: "0 0 16px", fontSize: 12, color: textMuted }}>
+              Signing address:{" "}
+              <span dir="ltr" style={{ unicodeBidi: "isolate", fontFamily: "monospace" }}>{signerAddress}</span>
               {multisigDescription && ` · ${multisigDescription}`}
             </p>
           )}
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <button
-              type="button"
-              onClick={onCancel}
-              style={{
-                padding: "9px 18px",
-                background: "none",
-                border: `1px solid ${border}`,
-                borderRadius: 6,
-                fontSize: 13,
-                color: dark ? "#D1D5DB" : "#374151",
-                cursor: "pointer",
-              }}
-            >
+            <button type="button" onClick={onCancel}
+              style={{ paddingBlock: 9, paddingInline: 18, background: "none", border: `1px solid ${border}`, borderRadius: 6, fontSize: 13, color: dark ? "#D1D5DB" : "#374151", cursor: "pointer" }}>
               Cancel
             </button>
-            <ConfirmButton
-              disabled={!allGuardsPassed}
-              viewerRole={viewerRole}
+            <ConfirmButton disabled={!allGuardsPassed} viewerRole={viewerRole}
               label={`Execute Pause${network === "mainnet" && pauseScope === "all" ? " (5s countdown)" : ""} →`}
+              dark={dark} onClick={network === "mainnet" ? handleInitiateCountdown : onConfirm} disabledReasonId={disabledReasonId} />
+            <ConfirmButton
+              disabled={!allGuardsPassed || step !== 2}
+              viewerRole={viewerRole}
+              label={`Execute ${action === "unpause" ? "Unpause" : "Pause"}${network === "mainnet" && pauseScope === "all" ? " (5s countdown)" : ""} →`}
               dark={dark}
-              onClick={network === "mainnet" ? handleInitiateCountdown : onConfirm}
+              onClick={network === "mainnet" ? handleInitiateCountdown : handleFinalConfirm}
               disabledReasonId={disabledReasonId}
             />
           </div>
         </>
       )}
 
-      {/* Keyframe styles injected inline */}
       <style>{`
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulseFade { 0% { opacity: 0.4; transform: scale(0.9); } 50% { opacity: 1; transform: scale(1); } 100% { opacity: 0.4; transform: scale(0.9); } }

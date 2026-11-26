@@ -1,0 +1,19 @@
+route:
+  receiver: slack-default
+  group_by: [alertname, severity]
+  routes:
+    - matchers: [severity="critical"]
+      receiver: pagerduty-critical
+receivers:
+  - name: slack-default
+    slack_configs:
+      - api_url_file: /etc/alertmanager/secrets/slack_webhook_url   # mount a secret file; never commit URLs
+        channel: "#gridpay-alerts"
+        send_resolved: true
+  - name: pagerduty-critical
+    pagerduty_configs:
+      - routing_key_file: /etc/alertmanager/secrets/pagerduty_routing_key
+inhibit_rules:
+  # A total Soroban RPC outage suppresses downstream lag/error-rate alerts.
+  - source_matchers: [alertname="SorobanRpcDown"]
+    target_matchers: [alertname=~"IndexerLedgerLag|SorobanRpcErrorRate"]

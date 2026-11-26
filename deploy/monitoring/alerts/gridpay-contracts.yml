@@ -1,0 +1,118 @@
+groups:
+  # Alerts on metrics that EXIST today (services/crank-worker/src/metrics.ts).
+  - name: gridpay-crank-worker
+    rules:
+      - alert: CrankWorkerDown
+        expr: up{job="crank-worker"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: crank-worker is not scraping
+          recovery: up == 1 for 5m
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#crankworkerdown
+      - alert: CrankPermanentFailures
+        expr: increase(crank_permanent_failures_total[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: crank jobs exhausted retries or reverted
+          recovery: no new permanent failures for 30m
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#crankpermanentfailures
+      - alert: CrankCircuitBreakerOpen
+        expr: increase(crank_skipped_total{reason="circuit_open"}[10m]) > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: crank-worker circuit breaker has been skipping tasks for 10m
+          recovery: crank_skipped_total{reason="circuit_open"} stops increasing
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#crankcircuitbreakeropen
+      - alert: CrankQueueBacklog
+        expr: crank_due_queue_depth > 100
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: due crank queue depth above 100
+          recovery: crank_due_queue_depth < 100
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#crankqueuebacklog
+      - alert: CrankGasSpendHigh
+        expr: rate(crank_gas_spent_stroops_total[1h]) > 5e7
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: crank resource fee burn above 5 XLM/hour
+          recovery: rate back under threshold (threshold is a guess, tune it)
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#crankgasspendhigh
+
+  # PLANNED alerts: the metrics below DO NOT EXIST in the repo yet. They are the
+  # contract an exporter / indexer / relayer must implement. They will not fire until then.
+  - name: gridpay-planned-metrics
+    rules:
+      - alert: SorobanTTLWarning
+        expr: min(gridpay_contract_storage_ttl_ledgers_remaining) < 17280
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: storage TTL under 17,280 ledgers (~24h)
+          recovery: TTL extended above 17,280 ledgers
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#sorobanttl
+      - alert: SorobanTTLCritical
+        expr: min(gridpay_contract_storage_ttl_ledgers_remaining) < 4320
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: storage TTL under 4,320 ledgers (~6h)
+          recovery: TTL extended above 17,280 ledgers
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#sorobanttl
+      - alert: ContractPaused
+        expr: max(gridpay_contract_paused) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: a contract reports paused via get_system_status
+          recovery: gridpay_contract_paused == 0 for all contracts
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#contractpaused
+      - alert: RefundCircuitBreakerTripped
+        expr: max(gridpay_refund_circuit_breaker_tripped) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: refund circuit breaker tripped
+          recovery: gridpay_refund_circuit_breaker_tripped == 0
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#refundcircuitbreaker
+      - alert: SignerXlmBalanceLow
+        expr: min(gridpay_signer_xlm_balance) < 50
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: relayer/keeper XLM balance under 50
+          recovery: balance above 50 XLM
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#signerbalance
+      - alert: SignerXlmBalanceCritical
+        expr: min(gridpay_signer_xlm_balance) < 10
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: relayer/keeper XLM balance under 10
+          recovery: balance above 50 XLM
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#signerbalance
+      - alert: IndexerLedgerLag
+        expr: gridpay_indexer_ledger_lag > 12
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: indexer more than 12 ledgers behind
+          recovery: lag under 12 ledgers
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#indexerlag
+      - alert: SorobanRpcErrorRate
+        expr: sum(rate(soroban_rpc_requests_total{code=~"5.."}[5m])) / sum(rate(soroban_rpc_requests_total[5m])) > 0.01
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: Soroban RPC 5xx rate above 1%
+          recovery: rate under 1%
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#sorobanrpcerrors
+      - alert: SorobanRpcDown
+        expr: up{job="soroban-rpc"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Soroban RPC unreachable
+          recovery: up == 1
+          runbook_url: docs/OBSERVABILITY_RUNBOOK.md#sorobanrpcerrors

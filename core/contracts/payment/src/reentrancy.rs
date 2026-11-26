@@ -61,8 +61,14 @@ impl ExternalEntry {
 
 impl Drop for ExternalEntry {
     fn drop(&mut self) {
-        self.env.storage().temporary().remove(&TemporaryKey::ReentrancyLock);
-        self.env.storage().temporary().remove(&TemporaryKey::CallContext);
+        self.env
+            .storage()
+            .temporary()
+            .remove(&TemporaryKey::ReentrancyLock);
+        self.env
+            .storage()
+            .temporary()
+            .remove(&TemporaryKey::CallContext);
     }
 }
 
@@ -94,9 +100,18 @@ pub fn current_context(env: &Env) -> CallContextState {
 pub fn accept_callback(env: &Env, expected: &CallContextState, caller: &Address) -> Result<(), ()> {
     let current = current_context(env);
     let sibling = match (&current, expected) {
-        (CallContextState::AwaitingEscrowCallback(a), CallContextState::AwaitingEscrowCallback(_))
-        | (CallContextState::AwaitingRefundCallback(a), CallContextState::AwaitingRefundCallback(_))
-        | (CallContextState::AwaitingPaymentCallback(a), CallContextState::AwaitingPaymentCallback(_)) => a,
+        (
+            CallContextState::AwaitingEscrowCallback(a),
+            CallContextState::AwaitingEscrowCallback(_),
+        )
+        | (
+            CallContextState::AwaitingRefundCallback(a),
+            CallContextState::AwaitingRefundCallback(_),
+        )
+        | (
+            CallContextState::AwaitingPaymentCallback(a),
+            CallContextState::AwaitingPaymentCallback(_),
+        ) => a,
         _ => return Err(()),
     };
     if sibling != caller {

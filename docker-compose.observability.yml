@@ -1,0 +1,135 @@
+# docker-compose.observability.yml
+#
+# Optional observability stack for local development.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.observability.yml \
+#     --profile observability up -d
+#
+# Or, if you only want the observability stack:
+#   docker compose -f docker-compose.observability.yml --profile observability up -d
+#
+# Services in the main docker-compose.yml should send OTLP traffic to
+# http://otel-collector:4317 (gRPC) or http://otel-collector:4318 (HTTP).
+# From the host machine, use http://localhost:4317 / http://localhost:4318.
+
+name: stellar-observability
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: otel-collector
+    profiles: ["observability"]
+    command:
+      - "--config=/etc/otelcol/config.yaml"
+    volumes:
+      - ./deploy/monitoring/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      # OTLP receivers
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      # Collector self-observability
+      - "13133:13133" # health_check extension
+      - "8888:8888"   # Prometheus metrics for the collector itself
+      - "55679:55679" # zpages (debugging)
+    environment:
+      - GOMEMLIMIT=400MiB
+    depends_on:
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - observability
+
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: loki
+    profiles: ["observability"]
+    command:
+      - "-config.file=/etc/loki/local-config.yaml"
+    ports:
+      - "3100:3100"
+    volumes:
+      - loki-data:/loki
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - observability
+
+  tempo:
+    image: grafana/tempo:2.5.0
+    container_name: tempo
+    profiles: ["observability"]
+    command:
+      - "-config.file=/etc/tempo/tempo.yaml"
+    ports:
+      - "3200:3200"   # Tempo HTTP API
+      - "9095:9095"   # Tempo gRPC
+    volumes:
+      - ./deploy/monitoring/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3200/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - observability
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: grafana
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - observability
+
+volumes:
+  loki-data:
+    driver: local
+  tempo-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  observability:
+    name: stellar-observability
+    driver: bridge

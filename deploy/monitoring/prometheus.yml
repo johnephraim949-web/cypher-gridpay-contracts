@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+scrape_configs:
+  # REAL: crank-worker exposes /metrics when CRANK_METRICS_PORT is set.
+  - job_name: crank-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["crank-worker:9464"]
+  # PLACEHOLDERS: these services do not expose metrics in the repo today (see docs/OBSERVABILITY.md).
+  - job_name: soroban-rpc
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["soroban-rpc:8001"]
+  - job_name: indexer
+    static_configs:
+      - targets: ["indexer:8081"]
+  - job_name: relayer
+    static_configs:
+      - targets: ["relayer:8080"]
+  - job_name: webhook-worker
+    static_configs:
+      - targets: ["webhook-worker:8083"]
+  - job_name: contract-exporter
+    static_configs:
+      - targets: ["contract-exporter:9100"]

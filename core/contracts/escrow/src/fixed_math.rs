@@ -100,7 +100,10 @@ mod tests {
         assert!(a.checked_mul(10_000).is_none());
         assert_eq!(mul_div_floor(&env, a, 10_000, 10_000), Ok(a));
         assert_eq!(mul_div_ceil(&env, a, 10_000, 10_000), Ok(a));
-        assert_eq!(mul_div_floor(&env, i128::MAX, i128::MAX, i128::MAX), Ok(i128::MAX));
+        assert_eq!(
+            mul_div_floor(&env, i128::MAX, i128::MAX, i128::MAX),
+            Ok(i128::MAX)
+        );
     }
 
     #[test]
@@ -111,7 +114,10 @@ mod tests {
         assert_eq!(mul_div_ceil(&env, 1, 1, 0), Err(ArithmeticOverflow));
         assert_eq!(mul_div_ceil(&env, 1, 1, -5), Err(ArithmeticOverflow));
         // quotient does not fit
-        assert_eq!(mul_div_floor(&env, i128::MAX, 2, 1), Err(ArithmeticOverflow));
+        assert_eq!(
+            mul_div_floor(&env, i128::MAX, 2, 1),
+            Err(ArithmeticOverflow)
+        );
     }
 
     #[test]

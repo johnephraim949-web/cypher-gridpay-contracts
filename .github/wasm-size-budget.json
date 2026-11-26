@@ -1,0 +1,5 @@
+{
+  "_comment": "Per-contract optimized WASM byte ceilings (issue #365). default_bytes is the 64 KB Soroban target. Add an override only with a documented reason and review date.",
+  "default_bytes": 65536,
+  "overrides": {}
+}

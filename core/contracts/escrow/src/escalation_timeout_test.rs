@@ -229,11 +229,7 @@ fn test_trigger_timeout_requires_arbitration_when_both_submit_evidence() {
 // ── Issue #218: DisputeRubricEvaluation tests ────────────────────────────────
 
 /// Helper: sets up the dispute oracle and returns the oracle address.
-fn setup_oracle(
-    env: &Env,
-    client: &EscrowContractClient,
-    admin: &Address,
-) -> Address {
+fn setup_oracle(env: &Env, client: &EscrowContractClient, admin: &Address) -> Address {
     let oracle = Address::generate(env);
     client.set_dispute_oracle(admin, &oracle, &9_000u32);
     oracle
@@ -414,7 +410,7 @@ fn test_buyer_veto_escalates_to_arbitration() {
     client.submit_dispute_recommendation(
         &oracle,
         &escrow_id,
-        &3_000u32,  // buyer only gets 30 % — buyer will veto
+        &3_000u32, // buyer only gets 30 % — buyer will veto
         &7_000u32,
         &9_500u32,
         &dummy_rubric(&env),
@@ -450,7 +446,7 @@ fn test_seller_veto_escalates_to_arbitration() {
         &oracle,
         &escrow_id,
         &9_000u32,
-        &1_000u32,  // seller only gets 10 % — seller will veto
+        &1_000u32, // seller only gets 10 % — seller will veto
         &9_500u32,
         &dummy_rubric(&env),
         &3_600u64,
