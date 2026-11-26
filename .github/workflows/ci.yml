@@ -1,17 +1,21 @@
-name: CI/CD Pipeline
+name: CI
 
 on:
   push:
-    branches: [main, develop]
-    tags: ['v*']
+    branches: [main]
   pull_request:
-    branches: [main, develop]
 
 jobs:
-  relayer:
-    name: Gasless Relayer (Node/TypeScript)
+  error-catalog:
+    name: Error Catalog Sync
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Verify error catalog is in sync
+        run: python3 scripts/generate-error-catalog.py --check
       - name: Checkout code
         uses: actions/checkout@v7
 
