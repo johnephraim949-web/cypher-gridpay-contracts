@@ -57,12 +57,14 @@ token's own exponent:
 | Wrapped stablecoin with 6 decimals | 6 | 10 units | `10_000_000` |
 | Wrapped asset with 18 decimals | 18 | 10 units | `10_000_000_000_000_000_000` |
 
-Rate arithmetic is independent of the token exponent: a rate of `1_0000000` maps
-raw input to raw output 1:1, while `15_000_000` means 1.5x. If the source and
-target tokens have different decimals, **the client must convert the resulting raw
-output into the target token's exponent**; the contract will not do it. For
-example, 10 units of a 7-decimal token at 1.5x is raw `150_000_000`; expressed in
-a 6-decimal target that is `150_000_000 / 10^(7-6) = 15_000_000` raw units.
+The swap operates directly on integer base units. When source and target
+precision differ, the oracle must include the precision ratio in the rate
+that the contract snapshots. For example, 10 tokens at 7 decimals is
+`100_000_000` source base units. At a 1.5 whole-token rate and 6 target
+decimals, publish the fixed-point base-unit rate `1_500_000` (0.15 × 1e7).
+The contract then records `15_000_000` target base units. Verify that the
+rate is representable at 1e7 precision and that the intermediate i128
+product fits before configuring the swap.
 
 ### Dust floor
 
@@ -126,26 +128,26 @@ not check any of this):
 
 ### CLI: whitelist a token on Testnet
 
-Mirror the style of `docs/DEPLOYMENT.md` (`--source <secret>` + `--network testnet`):
+Replace the example contract IDs with your Testnet IDs. Use the name of a locally configured Stellar CLI identity for the admin signer.
 
 ```bash
 export NETWORK=testnet
 export PAYMENT_ID=C...                    # payment contract id
-export ADMIN_KEY=<YOUR_SECRET_KEY>        # not a seed phrase in shell history
-export ADMIN_ADDR=$(stellar keys address <ADMIN_IDENTITY>)
+export ADMIN_IDENTITY=gridpay-admin
+ADMIN_ADDR=$(stellar keys address "$ADMIN_IDENTITY")
 export USDC_ID=C...                       # Stellar Asset Contract id
 
 # Whitelist the token (idempotent, no event emitted)
 stellar contract invoke \
     --id $PAYMENT_ID \
-    --source $ADMIN_KEY \
+    --source "$ADMIN_IDENTITY" \
     --network $NETWORK \
     -- add_allowed_token \
     --admin $ADMIN_ADDR \
     --token $USDC_ID
 
 # Verify
-stellar contract invoke --id $PAYMENT_ID --network $NETWORK -- get_allowed_tokens
+stellar contract invoke --id $PAYMENT_ID --network $NETWORK --source "$ADMIN_IDENTITY" -- get_allowed_tokens
 ```
 
 ---
@@ -230,12 +232,12 @@ stale; re-enable the feed only after `refresh_conversion_rate` succeeds.
 ```bash
 export CURRENCY=USDC
 export ORACLE_ID=C...                      # oracle contract exposing get_price(feed_id) -> (rate, timestamp)
-export FEED_ID=<64 hex chars>              # 32-byte price_feed_id
+export FEED_ID=0000000000000000000000000000000000000000000000000000000000000001  # Replace with the adapter feed ID
 
 # 1. Set a known-good manual fallback rate (1.0000000 = 1:1)
 stellar contract invoke \
     --id $PAYMENT_ID \
-    --source $ADMIN_KEY \
+    --source "$ADMIN_IDENTITY" \
     --network $NETWORK \
     -- set_conversion_rate \
     --admin $ADMIN_ADDR \
@@ -245,26 +247,28 @@ stellar contract invoke \
 # 2. Configure the feed (struct passed as JSON; enum as its variant name)
 stellar contract invoke \
     --id $PAYMENT_ID \
-    --source $ADMIN_KEY \
+    --source "$ADMIN_IDENTITY" \
     --network $NETWORK \
     -- set_oracle_rate_config \
     --admin $ADMIN_ADDR \
     --config "{\"oracle_address\":\"$ORACLE_ID\",\"currency\":\"$CURRENCY\",\"price_feed_id\":\"$FEED_ID\",\"max_staleness_seconds\":300,\"enabled\":true}"
 
 # 3. Verify the stored config and the effective rate
-stellar contract invoke --id $PAYMENT_ID --network $NETWORK -- get_oracle_rate_config --currency $CURRENCY
-stellar contract invoke --id $PAYMENT_ID --network $NETWORK -- get_conversion_rate --currency $CURRENCY
+stellar contract invoke --id $PAYMENT_ID --network $NETWORK --source "$ADMIN_IDENTITY" -- get_oracle_rate_config --currency $CURRENCY
+stellar contract invoke --id $PAYMENT_ID --network $NETWORK --source "$ADMIN_IDENTITY" -- get_conversion_rate --currency $CURRENCY
 
 # 4. Keeper refresh (permissionless; fails with 119 if the feed is stale)
 stellar contract invoke \
     --id $PAYMENT_ID \
     --network $NETWORK \
+    --source "$ADMIN_IDENTITY" \
     -- refresh_conversion_rate \
     --currency $CURRENCY
 ```
 
-If the feed is unhealthy, set `enabled:false` in step 2 (or keep the previously
-stored manual rate) and document who re-enables it. There is no automatic
+If the feed is unhealthy, disable refresh writes with `enabled:false` in step 2,
+then write a reviewed manual rate. A successful refresh on an enabled feed
+overwrites the rate slot. Document who re-enables the feed. There is no automatic
 deviation trip switch in the payment contract.
 
 ---
@@ -331,12 +335,12 @@ export ESCROW_CONTRACT_ID=C...         # escrow contract id (not the record id)
 export ESCROW_ID=1                     # numeric escrow record id inside the contract
 export SWAP_ORACLE_ID=C...             # must implement get_rate() and get_updated_at()
 export TARGET_TOKEN_ID=C...
-export MERCHANT_ADDR=$(stellar keys address <MERCHANT_IDENTITY>)
-export MERCHANT_KEY=<MERCHANT_SECRET_KEY>
+export MERCHANT_IDENTITY=gridpay-merchant
+MERCHANT_ADDR=$(stellar keys address "$MERCHANT_IDENTITY")
 
 stellar contract invoke \
     --id $ESCROW_CONTRACT_ID \
-    --source $MERCHANT_KEY \
+    --source "$MERCHANT_IDENTITY" \
     --network $NETWORK \
     -- configure_escrow_swap \
     --merchant $MERCHANT_ADDR \
@@ -345,11 +349,11 @@ stellar contract invoke \
     --min_output 9000000 \
     --oracle $SWAP_ORACLE_ID
 
-stellar contract invoke --id $ESCROW_CONTRACT_ID --network $NETWORK -- get_swap_config --escrow_id $ESCROW_ID
+stellar contract invoke --id $ESCROW_CONTRACT_ID --network $NETWORK --source "$MERCHANT_IDENTITY" -- get_swap_config --escrow_id $ESCROW_ID
 
 stellar contract invoke \
     --id $ESCROW_CONTRACT_ID \
-    --source $MERCHANT_KEY \
+    --source "$MERCHANT_IDENTITY" \
     --network $NETWORK \
     -- execute_escrow_swap \
     --caller $MERCHANT_ADDR \
@@ -370,7 +374,7 @@ call any conversion-rate entrypoint.
   entry. `get_supported_refund_tokens` (line 12230) lists the registry.
 - As with the payment allowlist, an **empty registry means all tokens are
   allowed** (Issue #191). `request_refund` validates the token against the
-  registry only when the registry is non-empty; otherwise an unlisted token
+  registry only when the registry is non-empty. In that case an unlisted token
   returns `UnsupportedRefundToken` (50)
   (`core/contracts/refund/src/lib.rs:2738`).
 - Refund records carry `original_token: Address` (lines 1213, 1245) set from the
@@ -384,18 +388,18 @@ call any conversion-rate entrypoint.
 
 ```bash
 export REFUND_ID=C...
-export REFUND_ADMIN_KEY=<REFUND_ADMIN_SECRET_KEY>
-export REFUND_ADMIN_ADDR=$(stellar keys address <REFUND_ADMIN_IDENTITY>)
+export REFUND_ADMIN_IDENTITY=gridpay-refund-admin
+REFUND_ADMIN_ADDR=$(stellar keys address "$REFUND_ADMIN_IDENTITY")
 
 stellar contract invoke \
     --id $REFUND_ID \
-    --source $REFUND_ADMIN_KEY \
+    --source "$REFUND_ADMIN_IDENTITY" \
     --network $NETWORK \
     -- register_refund_token \
     --admin $REFUND_ADMIN_ADDR \
     --token $USDC_ID
 
-stellar contract invoke --id $REFUND_ID --network $NETWORK -- get_supported_refund_tokens
+stellar contract invoke --id $REFUND_ID --network $NETWORK --source "$REFUND_ADMIN_IDENTITY" -- get_supported_refund_tokens
 ```
 
 ---
@@ -426,8 +430,8 @@ existing payments or escrows.
 
 - [ ] Only do this once no refunds in that token remain to be requested. It sets
       `active = false`; existing refund records keep their `original_token`.
-- [ ] Remember that an empty registry re-opens refunds to all tokens. Add other
-      supported tokens first if you want a closed set.
+- [ ] Deactivation leaves the registry entry in place. Keep any other tokens
+      that need to accept new refunds active.
 - [ ] Verify with `get_supported_refund_tokens`.
 
 **Compromised token (urgent):** pause affected entrypoints or use the global
@@ -466,13 +470,13 @@ through pending payments/escrows. Never leave the allowlist/registry empty unles
 
 ```bash
 # Allowlist, oracle config and effective rate
-stellar contract invoke --id $PAYMENT_ID --network $NETWORK -- get_allowed_tokens
-stellar contract invoke --id $PAYMENT_ID --network $NETWORK -- get_oracle_rate_config --currency $CURRENCY
-stellar contract invoke --id $PAYMENT_ID --network $NETWORK -- get_conversion_rate --currency $CURRENCY
+stellar contract invoke --id $PAYMENT_ID --network $NETWORK --source "$ADMIN_IDENTITY" -- get_allowed_tokens
+stellar contract invoke --id $PAYMENT_ID --network $NETWORK --source "$ADMIN_IDENTITY" -- get_oracle_rate_config --currency $CURRENCY
+stellar contract invoke --id $PAYMENT_ID --network $NETWORK --source "$ADMIN_IDENTITY" -- get_conversion_rate --currency $CURRENCY
 
 # Refund registry and escrow swap state
-stellar contract invoke --id $REFUND_ID --network $NETWORK -- get_supported_refund_tokens
-stellar contract invoke --id $ESCROW_CONTRACT_ID --network $NETWORK -- get_swap_config --escrow_id $ESCROW_ID
+stellar contract invoke --id $REFUND_ID --network $NETWORK --source "$REFUND_ADMIN_IDENTITY" -- get_supported_refund_tokens
+stellar contract invoke --id $ESCROW_CONTRACT_ID --network $NETWORK --source "$MERCHANT_IDENTITY" -- get_swap_config --escrow_id $ESCROW_ID
 ```
 
 For read-only checks you may use `--send=no` as shown in

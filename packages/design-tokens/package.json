@@ -1,0 +1,21 @@
+{
+  "name": "@cypher-gridpay/design-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/themes.d.ts",
+      "default": "./dist/themes.js"
+    },
+    "./tailwind": "./tailwind.config.mjs"
+  },
+  "scripts": {
+    "build": "node style-dictionary.config.mjs && tsc",
+    "test": "npm run build && node contrast.test.mjs"
+  },
+  "devDependencies": {
+    "style-dictionary": "5.8.0",
+    "typescript": "5.9.3"
+  }
+}

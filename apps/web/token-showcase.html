@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cypher GridPay design tokens</title>
+<link rel="stylesheet" href="./src/styles/fonts.css">
+<link rel="stylesheet" href="./src/styles/tokens.css">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    max-width: 70rem;
+    margin: auto;
+    padding: var(--gp-space-8);
+    background: var(--gp-semantic-surface);
+    color: var(--gp-semantic-text);
+    font: var(--gp-font-size-base)/var(--gp-line-height-body) var(--gp-font-sans);
+  }
+  header, .samples { display: flex; flex-wrap: wrap; gap: var(--gp-space-4); }
+  header { justify-content: space-between; align-items: center; }
+  h1, h2 { line-height: var(--gp-line-height-tight); }
+  section { margin-block: var(--gp-space-8); }
+  .samples { list-style: none; padding: 0; }
+  .card { padding: var(--gp-space-4); border-radius: var(--gp-radius-md); }
+  .swatch { display: block; width: 4rem; height: 3rem; border-radius: var(--gp-radius-sm); }
+  .layer { background: var(--gp-semantic-raised); min-width: 9rem; }
+  :focus-visible { outline: 3px solid var(--gp-semantic-focus); outline-offset: 3px; }
+  select {
+    font: inherit;
+    padding: var(--gp-space-2);
+    border: 1px solid var(--gp-semantic-border);
+    border-radius: var(--gp-radius-sm);
+    background: var(--gp-semantic-raised);
+    color: var(--gp-semantic-text);
+  }
+  .gp-numeric { overflow-wrap: anywhere; }
+</style>
+<header>
+  <h1>Cypher GridPay design tokens</h1>
+  <label>Theme <select id="theme"><option value="light">Light</option><option value="dark">Dark</option></select></label>
+</header>
+<main>
+  <section>
+    <h2>Brand</h2>
+    <ul class="samples" id="brand"></ul>
+  </section>
+  <section>
+    <h2>Neutral</h2>
+    <ul class="samples" id="neutral"></ul>
+  </section>
+  <section>
+    <h2>Semantic colors</h2>
+    <ul class="samples" id="semantic"></ul>
+    <div class="card" style="background: var(--gp-semantic-raised); border: 2px solid var(--gp-semantic-border)">
+      Raised surface with a control border and <span style="color: var(--gp-semantic-muted)">muted text</span>
+    </div>
+  </section>
+  <section>
+    <h2>Typography</h2>
+    <ul id="sizes"></ul>
+    <p>Address and amount glyph sample</p>
+    <p class="gp-numeric">GABC234567 · CDEF234567 · 0 O I l 1 · 10,001.0010000</p>
+  </section>
+  <section>
+    <h2>Elevation</h2>
+    <ul class="samples" id="elevation"></ul>
+  </section>
+</main>
+<script>
+  const root = document.documentElement;
+  document.querySelector('#theme').addEventListener('change', (event) => {
+    root.dataset.theme = event.target.value;
+  });
+
+  function sample(group, label, className = '') {
+    const item = document.createElement('li');
+    item.className = className;
+    item.textContent = label;
+    document.getElementById(group).append(item);
+    return item;
+  }
+
+  const tokens = [...getComputedStyle(root)].filter((name) => name.startsWith('--gp-'));
+  for (const group of ['brand', 'neutral']) {
+    for (const name of tokens.filter((token) => token.startsWith(`--gp-${group}-`)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))) {
+      const item = sample(group, name.split('-').at(-1), 'card');
+      const swatch = document.createElement('span');
+      swatch.className = 'swatch';
+      swatch.style.backgroundColor = `var(${name})`;
+      item.prepend(swatch);
+    }
+  }
+  const statuses = {
+    action: 'Primary action',
+    'settled-active': 'Settled / Active',
+    'pending-timelocked': 'Pending / Timelocked',
+    'disputed-warning': 'Disputed / Warning',
+    'paused-slashed-error': 'Paused / Slashed / Error',
+    'archived-expired': 'Archived / Expired',
+  };
+  for (const [name, label] of Object.entries(statuses)) {
+    const item = sample('semantic', label, 'card');
+    item.style.backgroundColor = `var(--gp-semantic-${name}-background)`;
+    item.style.color = `var(--gp-semantic-${name}-foreground)`;
+  }
+  for (const size of ['xs', 'sm', 'base', 'lg', 'xl', '2xl', '3xl']) {
+    sample('sizes', `${size} · Settlement summary`).style.fontSize = `var(--gp-font-size-${size})`;
+  }
+  for (const layer of ['low', 'medium', 'high']) {
+    sample('elevation', layer, 'card layer').style.boxShadow = `var(--gp-elevation-${layer})`;
+  }
+</script>
+</html>

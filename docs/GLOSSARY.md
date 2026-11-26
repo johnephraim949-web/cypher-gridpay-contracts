@@ -1,110 +1,208 @@
 # Glossary
 
+See the [contract overview](../README.md#-contract-overview),
+[architecture guide](ARCHITECTURE.md), and [changelog](../CHANGELOG.md).
+
 ## Admin Orchestrator
 
-The top-level coordinator contract located in `orchestrator/contracts/admin` that manages cross-contract operations, emergency pauses, dynamic address updates, and access control across the Payment, Escrow, and Refund contracts.
+The contract that coordinates protocol-wide pauses, dependency rotations,
+WASM upgrades, and protocol parameters across Payment, Escrow and Refund.
+See the [Admin contract](../orchestrator/contracts/admin/README.md).
 
-## Arbitrator
+## Arbitration and Arbitrator
 
-A registered, trusted entity or account capable of resolving disputed escrows and appeals within the refund contract. Arbitrators maintain on-chain reputation scores and can be subject to stake slashing for fraudulent or non-responsive rulings.
+Arbitration is the review of a contested refund or escrow. A Refund arbitrator
+is a registered adjudicator who may be required to stake funds and whose
+voting record contributes to reputation. See the
+[arbitration lifecycle](../core/contracts/refund/README.md#-arbitration-workflow).
+
+## Checks-Effects-Interactions
+
+Validate and authorize first, update internal state second, and perform
+external calls last. The ordering limits unsafe reentrant state changes.
 
 ## Circuit Breaker
 
-An automated safety mechanism that halts contract state changes or limits transaction volume when certain volatility or aggregate refund thresholds are breached within a rolling window.
+An automatic gate that limits activity when a configured threshold is crossed,
+such as refund volume in a rolling window. Oracle deviation checks can be
+implemented separately in an [oracle adapter](MULTI_ASSET_AND_ORACLES.md).
 
 ## Clawback
 
-An admin-controlled emergency fund-recovery mechanism for the escrow contract. When normal resolution paths (release, dispute, refund) are unavailable — for example, due to fraud, a compliance hold, or an irrecoverable deadlock — a multisig admin can forcibly recover the full escrow balance and transfer it to their own address.
+Escrow emergency recovery initiated by a registered admin with a reason
+commitment and a delay. After the delay a registered admin can execute the
+recovery to their address. See the [clawback lifecycle](../core/contracts/escrow/README.md#clawback).
 
-### Lifecycle
+## Commit-Reveal
 
-Clawback follows a strict three-phase sequence:
+A two-phase protocol. Participants first publish a hash commitment, then
+reveal the data and salt so the contract can check the commitment. Escrow uses
+it for [multi-party dispute votes](../core/contracts/escrow/README.md#multi-party-dispute-commit-reveal-voting).
 
-1. **Initiate** — An admin calls `initiate_clawback(admin, escrow_id, reason_hash, delay_seconds)`. The `reason_hash` is a 32-byte Keccak-256 (or equivalent) hash of an off-chain document that records the justification. The mandatory `delay_seconds` must be at least 86,400 seconds (24 hours), giving all parties a window to contest or seek remediation before funds move. A unique `request_id` is returned and stored on-chain.
+## Deadline Extension
 
-2. **Execute** — After the delay elapses, any admin can call `execute_clawback(admin, request_id)`. The full escrow amount is transferred from the contract to the **admin's address** (not to the original customer), and the escrow status is updated to `Resolved`.
+A bounded increase to an evidence deadline when eligible evidence arrives
+late in the submission window.
 
-3. **Cancel** — Any admin can call `cancel_clawback(admin, request_id)` at any time before execution to abort the request. Cancellation is final — a cancelled request cannot be re-activated. To retry, a new initiation must be filed.
+## Dunning
 
-### Key constraints
+Recovery of a failed subscription charge. `DunningState` records retry
+progress and timing for operations such as `retry_failed_payment`. See
+[failed payment recovery](../core/contracts/payment/README.md#dunning-failed-payment-recovery).
 
-- Only registered multisig admins may initiate, execute, or cancel a clawback.
-- Only one active (non-executed, non-cancelled) clawback request may exist per escrow at a time. A second initiation for the same escrow while a live request exists returns `AlreadyProcessed`.
-- Executing before the delay elapses returns `EscrowError::TimelockNotElapsed`.
-- No fees are deducted — the entire locked amount transfers to the admin.
+## Dust Floor and Dust Sink
 
-### Error reference
+A dust floor is the smallest amount accepted by a particular flow, such as a
+split recipient's minimum share. A dust sink is the designated recipient or
+accounting bucket for a remainder after integer rounding. For example, an
+escrow split ruling assigns the rounding remainder to the seller. See
+[economic invariants](ECONOMIC_INVARIANTS.md).
 
-| Error | Cause |
-|-------|-------|
-| `AlreadyProcessed` | A clawback request for this escrow is already active |
-| `NotReady` | The mandatory delay has not yet elapsed |
-| `Unauthorized` | Caller is not a registered admin |
+## Escrow
 
----
+Conditional custody for an agreed token amount. Release, refund, dispute,
+and expiry rules determine when funds move and to whom.
 
-## Core Protocol Terms
+## Fee Sweep
 
-### Escrow
+Withdrawal of accumulated protocol fees by an authorized caller. Fee
+accounting keeps those funds separate from outstanding payment liabilities.
 
-A smart contract mechanism that holds tokens in escrow until predefined conditions are met. In Cypher GridPay, escrows are created when a customer initiates a payment and are released to the merchant upon completion or refunded to the customer if the payment is cancelled or disputed.
+## Footprint Restoration
 
-### Payment Channel
+Restoring archived persistent or instance ledger entries required by a
+transaction. Use simulation to identify the footprint and follow the
+[restoration guide](STORAGE_RESTORATION.md).
 
-An off-chain mechanism for high-frequency micropayments between two parties. Balance updates are signed off-chain and only the final state is submitted on-chain. Each update includes a sequence number to prevent replay attacks.
+## Front-Running
 
-### Settlement
+Submitting a transaction intended to execute ahead of an observed pending
+transaction. Commit-reveal and locked swap quotes reduce exposure in
+specific protocol flows.
 
-The process of converting a locked payment into a final transfer to the merchant. Settlement occurs when the payment is completed by an admin, triggering the release of escrowed funds minus any applicable fees.
+## Griefing
 
-### Multi-Sig (Multi-Signature)
+Imposing cost or delay on another participant, for example through frivolous
+disputes. Rate limits, stakes and deadlines bound some of these costs.
 
-A security mechanism requiring multiple authorized signatures before executing sensitive operations. The Cypher GridPay protocol uses configurable multi-sig thresholds for admin operations like fee sweeps, contract pause, and admin changes.
+## Hold Period
 
-### Fee Sweep
+An escrow's minimum buyer inspection period, recorded as `hold_period_until`.
+It gates eligible release paths. A [timelock](#timelock) delays execution of
+a particular action or proposal.
 
-The accumulated protocol fees (from payment processing) that can be withdrawn by authorized admins. Sweeps are strictly limited to the accumulated fee balance and cannot touch merchant escrowed or unfinalized funds.
+## Instant Refund Buffer
 
-### Rate Limit
+An operational term for prefunded liquidity reserved for rapid refunds. The
+current Refund contract exposes funding and settlement flows and customer-tier
+instant approval. The checkout team should treat approval and actual token
+settlement as separate states.
 
-A sliding-window mechanism that restricts the number of payments a single address can create within a given time period. Rate limits prevent ledger spam and denial-of-service attacks.
+## Multisig
 
-### Circuit Breaker
+Authorization that requires a configured number of eligible approvals.
+Some entrypoints instead require a single signature from a registered admin.
+Consult the entrypoint and its policy before submitting a transaction.
 
-An automatic halt mechanism that pauses contract operations when anomalous conditions are detected (e.g., excessive refund volume, oracle failure). Circuit breakers protect funds during potential attack scenarios.
+## Oracle
 
-### Arbitration
+An external price or observation source. Cypher GridPay can refresh stored
+currency rates from an adapter and can snapshot a separate escrow swap rate.
+See the [multi-asset and oracle guide](MULTI_ASSET_AND_ORACLES.md).
 
-A dispute resolution process where a neutral third party (arbitrator) evaluates evidence from both sides and determines the outcome of a refund or escrow dispute. Arbitration requires staking and has time-bound deadlines.
+## Payment Channel
 
-### Vesting Schedule
+A micropayment mechanism where participants sign off-chain balance updates
+and settle against on-chain channel state. A sequence number orders updates.
 
-A time-based release mechanism for escrowed funds. Vesting schedules can be linear, cliff-based, or custom, and can be accelerated by authorized parties under specific conditions.
+## Payment Memo
 
-### Schema Version
+A Payment contract record containing an opaque reference and a digest of
+off-chain remittance evidence. See [privacy and compliance](PRIVACY_AND_COMPLIANCE.md).
 
-A numeric identifier stored in contract storage that tracks the current data layout version. Schema versioning enables safe data migrations when contract logic is upgraded.
+## Rate Limit
 
-### Checks-Effects-Interactions
+A policy capping the count or volume of activity in a time window, often
+scoped to an address or merchant.
 
-A security pattern where all state checks are performed first, then state changes are applied, and finally external calls are made. This pattern prevents reentrancy attacks.
+## Reentrancy
 
-### Reentrancy
+An external contract calling back during an invocation, while the original
+operation is still executing.
 
-An attack where a malicious contract calls back into the original contract before the first invocation completes, potentially manipulating state or draining funds. Prevented by following the Checks-Effects-Interactions pattern.
+## Reproducible WASM Build
 
-### Front-Running
+A deterministic build that lets a verifier rebuild the bytecode and compare
+its digest to a published manifest or deployed WASM. See the
+[WASM optimization guide](GAS_AND_WASM_OPTIMIZATION.md).
 
-The practice of observing pending transactions in the mempool and submitting a competing transaction with higher gas to execute first. In Cypher GridPay, front-running mitigations include admin authorization requirements and deadline extensions for dispute evidence.
+## Schema Migration Cursor
 
-### Griefing
+A persistent progress record that lets Payment, Escrow, and Refund migrate
+bounded batches across transactions with `migrate_schema_step`. Check
+completion and schema version before treating a deployment as upgraded.
+See [storage versioning](STORAGE_VERSIONING.md).
 
-An attack where an attacker causes inconvenience or financial loss to other users without direct benefit to themselves. Examples include submitting frivolous disputes or spamming the ledger.
+## Schema Version
 
-### Oracle
+The stored version of a contract's data layout. Migrations transform existing
+records before the contract reports the target version.
 
-An external data source that provides information to smart contracts, such as token price feeds. Cypher GridPay uses oracles for currency conversion and includes staleness checks to prevent manipulation.
+## SEP-29
 
-### Deadline Extension
+The [Stellar convention for account-level memo requirements](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0029.md).
 
-An automatic extension of dispute evidence submission deadlines when new evidence is submitted close to the deadline. This prevents front-running attacks on evidence submission.
+## SEP-41
+
+The [Stellar token interface](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0041.md),
+including balance, transfer, allowance and decimal precision methods.
+
+## SEP-42
+
+The [draft Stellar Asset List proposal](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0042.md).
+Some repository material uses “SEP-42” as shorthand for its WASM checksum
+workflow. The official proposal concerns asset lists.
+
+## Settlement
+
+The final asset movement for a payment, release or refund, as confirmed by a
+successful transaction and reconciled token movements.
+
+## Stellar Asset Contract (SAC)
+
+The Soroban contract representation of a Stellar classic asset, including
+native XLM and issued assets identified by asset code and issuer.
+
+## StreamingChannel
+
+An on-chain Payment record for prepaid token streaming. Its recipient can
+claim vested base units over time. See the
+[streaming lifecycle](../core/contracts/payment/README.md#streaming-channels).
+
+## Supreme Dispute
+
+A refund appeal escalated to the Admin Orchestrator. The current
+`resolve_supreme_dispute` entrypoint emits the governance decision. Track
+Refund state and settlement separately.
+
+## Timelock
+
+A restriction that prevents execution of an action, such as clawback,
+dependency rotation or an upgrade, until a specified ledger time has elapsed.
+
+## TTL (Time to Live)
+
+The ledger lifetime of a contract entry. Persistent or instance entries can
+be archived when their lifetime lapses. Temporary entries expire. See the
+[restoration guide](STORAGE_RESTORATION.md).
+
+## Vesting Schedule
+
+A rule determining when portions of locked funds become available, for
+example after a cliff or progressively over time.
+
+## Wilson Score
+
+The Wilson lower confidence bound ranks estimated proportions while
+accounting for sample size. Refund currently ranks arbitrators using a
+Bayesian-smoothed majority-vote rate instead.

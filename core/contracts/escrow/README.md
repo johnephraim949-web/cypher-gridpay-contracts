@@ -1,6 +1,6 @@
 # Escrow Contract
 
-This contract manages secure, conditional fund holding for the Facil-Pay ecosystem, ensuring assets are only released when agreed-upon conditions are met by all parties.
+This contract manages secure, conditional fund holding for the Cypher GridPay protocol, ensuring assets are only released when agreed-upon conditions are met by all parties.
 
 ## Public Functions
 
@@ -415,14 +415,14 @@ Escrow swaps are a controlled token conversion for a locked escrow. They are des
   - the swap config is stored per escrow and can only be executed once
 - `execute_escrow_swap(caller, escrow_id)`
   - allowed for the same callers as above
-  - checks the previously configured oracle and minimum output threshold
+  - checks the oracle update timestamp (maximum age 300 seconds) and minimum output using the snapshot
   - updates the escrow token and amount in place after successful execution
 
 ### Supported tokens and pricing
 
 - The escrow's source token is the token already stored on the escrow record.
 - The target token is arbitrary as long as it is a valid `Address`; the contract does not hard-code a whitelist. In practice, this is used for a configured conversion path such as USDC -> EURC or USDC -> XLM depending on the oracle and target address.
-- Pricing is taken from the configured oracle via `get_rate()`, which returns a `1e7` fixed-point value. The contract computes:
+- Pricing is snapshotted at configuration via `get_rate()`, which returns a `1e7` fixed-point value. The contract computes:
 
 ```rust
 output_amount = (escrow.amount * rate) / 10_000_000;
@@ -616,4 +616,19 @@ accessible via `git log -- core/contracts/escrow/src/lib_stable.rs`.
 
 ---
 
-[⬅ Back to Main README](../../README.md)
+[⬅ Back to Main README](../../../README.md)
+
+## Lifecycle and operating guides
+
+- **Custody and release** use `create_escrow`, `release_escrow`, and
+  `get_escrow`. Eligible release paths check the buyer hold period.
+- **Disputes** use `dispute_escrow`, evidence commitments, and
+  [commit-reveal voting](#multi-party-dispute-commit-reveal-voting).
+- **Operations** use [clawback](#clawback), [health monitoring](#health-monitoring),
+  and `migrate_schema_step` / `get_migration_cursor`.
+- **Swaps** use `configure_escrow_swap`, `execute_escrow_swap`, and
+  `get_swap_config`. See the [multi-asset guide](../../../docs/MULTI_ASSET_AND_ORACLES.md).
+
+See [storage versioning](../../../docs/STORAGE_VERSIONING.md),
+[audit verification](../../../docs/PRIVACY_AND_COMPLIANCE.md#export-and-independently-verify-audit-evidence),
+[glossary](../../../docs/GLOSSARY.md) and [changelog](../../../CHANGELOG.md).

@@ -123,3 +123,7 @@ tag, and changing the layout means a new `DOMAIN_V*` tag.
 
 ---
 *Last Updated: September 2026*
+
+## Payment data and audit evidence
+
+See the [privacy and compliance guide](docs/PRIVACY_AND_COMPLIANCE.md) for ledger data classification, memo commitments and audit verification.
