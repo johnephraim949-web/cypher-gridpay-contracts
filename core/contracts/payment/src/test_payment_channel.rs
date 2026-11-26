@@ -105,7 +105,11 @@ fn test_payment_channel_full_lifecycle() {
     let nonce: u64 = 1;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &nonce,
+        ),
     );
 
     // Collect message bytes and sign
@@ -170,7 +174,11 @@ fn test_settle_channel_invalid_nonce() {
     let bad_nonce: u64 = 0;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &bad_nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &bad_nonce,
+        ),
     );
 
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
@@ -227,7 +235,11 @@ fn test_settle_channel_rejects_negative_merchant_amount() {
     let nonce: u64 = 1;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &nonce,
+        ),
     );
 
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
@@ -293,7 +305,11 @@ fn test_stale_nonce_replay_rejected() {
     let sign_state = |nonce: u64, amount: i128| -> BytesN<64> {
         // The domain-bound settle digest (channels.rs) is what gets signed.
         let msg = Bytes::from(
-            PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &amount, &nonce),
+            PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+                &channel_id,
+                &amount,
+                &nonce,
+            ),
         );
         let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
         let sig = signing_key.sign(&msg_vec);
@@ -357,7 +373,11 @@ fn test_equal_nonce_replay_rejected() {
     // nonce=0 equals settled_nonce initial value of 0 — must be rejected (not strictly greater)
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &500i128, &0u64),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &500i128,
+            &0u64,
+        ),
     );
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
     let sig = signing_key.sign(&msg_vec);
@@ -488,7 +508,11 @@ fn counterparty_can_close_immediately_on_agreement() {
     let nonce: u64 = 1;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &nonce,
+        ),
     );
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
     let sig = signing_key.sign(&msg_vec);
@@ -542,7 +566,11 @@ fn close_transfers_correct_balances_to_each_party() {
     let nonce: u64 = 1;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &nonce,
+        ),
     );
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
     let sig = signing_key.sign(&msg_vec);
@@ -617,15 +645,23 @@ fn test_cross_contract_signature_replay_rejected() {
     let nonce: u64 = 1;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg_a = Bytes::from(
-        PaymentContractClient::new(&env, &contract_a).channel_settle_digest(&channel_id_a, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_a).channel_settle_digest(
+            &channel_id_a,
+            &merchant_amount,
+            &nonce,
+        ),
     );
     let msg_vec: alloc::vec::Vec<u8> = msg_a.iter().collect();
     let sig_a = signing_key.sign(&msg_vec);
     let sig_bn_a = BytesN::<64>::from_array(&env, &sig_a.to_bytes());
 
     // Attempt to settle contract_b with the signature created for contract_a — must fail
-    let replay_result = client_b.try_settle_channel(&channel_id_b, &merchant_amount, &nonce, &sig_bn_a);
-    assert!(replay_result.is_err(), "Cross-contract signature replay must be rejected");
+    let replay_result =
+        client_b.try_settle_channel(&channel_id_b, &merchant_amount, &nonce, &sig_bn_a);
+    assert!(
+        replay_result.is_err(),
+        "Cross-contract signature replay must be rejected"
+    );
 }
 
 #[test]
@@ -670,15 +706,16 @@ fn test_sequence_number_replay_rejected() {
     let stale_sequence: u64 = 0;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &stale_sequence),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &stale_sequence,
+        ),
     );
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
     let sig = signing_key.sign(&msg_vec);
     let sig_bn = BytesN::<64>::from_array(&env, &sig.to_bytes());
 
     let result = client.try_settle_channel(&channel_id, &merchant_amount, &stale_sequence, &sig_bn);
-    assert_eq!(
-        result,
-        Err(Ok(Error::Feature(FeatureError::InvalidNonce)))
-    );
+    assert_eq!(result, Err(Ok(Error::Feature(FeatureError::InvalidNonce))));
 }

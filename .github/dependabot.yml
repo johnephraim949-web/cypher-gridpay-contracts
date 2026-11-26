@@ -1,0 +1,118 @@
+# Dependabot configuration (issue #377).
+#
+# Ecosystems present in this repository:
+#   cargo           core/, orchestrator/, tests/e2e/ (three separate lockfiles / workspaces)
+#   npm             sdk/typescript, services/relayer, services/crank-worker
+#   pip             sdk/python (pyproject.toml)
+#   github-actions  .github/workflows
+#   docker-compose  docker-compose.yml (no Dockerfiles exist on main yet)
+#
+# Notes
+# - Version updates run weekly and are grouped to limit notification noise.
+# - Security updates are NOT bound to the weekly schedule: GitHub opens them
+#   immediately once "Dependabot security updates" is enabled in repository
+#   Settings > Code security. The `security-updates` groups below only batch
+#   them per ecosystem.
+# - Nothing here auto-merges. Major bumps of soroban-sdk / stellar-* are kept
+#   in their own PR and need manual review plus `make differential` and
+#   `budget-bench` verification before merge.
+# - core/ and orchestrator/ must keep the same soroban-sdk version (XDR
+#   compatibility); one cargo entry spans all three Rust directories so the
+#   soroban/stellar group produces a single, synchronized PR.
+# - Dependabot assigns a dependency to the first group that matches, so the
+#   soroban/stellar group is listed first.
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directories:
+      - "/core"
+      - "/orchestrator"
+      - "/tests/e2e"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      soroban-stellar:
+        patterns:
+          - "soroban-*"
+          - "stellar-*"
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directories:
+      - "/sdk/typescript"
+      - "/services/relayer"
+      - "/services/crank-worker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      stellar-js:
+        patterns:
+          - "@stellar/*"
+          - "stellar-*"
+      npm-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+      npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: "pip"
+    directory: "/sdk/python"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      pip-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+      pip-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      docker-compose:
+        patterns:
+          - "*"

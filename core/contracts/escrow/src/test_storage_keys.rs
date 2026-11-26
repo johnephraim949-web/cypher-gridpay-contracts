@@ -643,7 +643,9 @@ fn test_namespaced_keys_hold_independent_values() {
 /// `MAX_INSTANCE_STORAGE_BYTES` with the buffer full.
 mod instance_budget {
     use crate::storage::assert_instance_storage_within_budget;
-    use crate::{ConfigKey, DataKey, EscrowContract, EscrowContractClient, PauseHistory, PAUSE_HISTORY_LIMIT};
+    use crate::{
+        ConfigKey, DataKey, EscrowContract, EscrowContractClient, PauseHistory, PAUSE_HISTORY_LIMIT,
+    };
     use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
     const LONG_REASON: &str = "Emergency pause: an oracle feed reported a price outside the configured \
@@ -672,7 +674,9 @@ mod instance_budget {
 
         assert_instance_storage_within_budget(&env, &contract_id);
         assert_eq!(
-            client.get_pause_history(&(PAUSE_HISTORY_LIMIT as u32), &0).len() as u64,
+            client
+                .get_pause_history(&(PAUSE_HISTORY_LIMIT as u32), &0)
+                .len() as u64,
             PAUSE_HISTORY_LIMIT
         );
         env.as_contract(&contract_id, || {
@@ -699,7 +703,10 @@ mod instance_budget {
 
         let history = client.get_pause_history(&10, &0);
         assert_eq!(history.len(), 1);
-        assert_eq!(history.get(0).unwrap().reason, String::from_str(&env, "first"));
+        assert_eq!(
+            history.get(0).unwrap().reason,
+            String::from_str(&env, "first")
+        );
 
         // Unpausing rewrites the slot, which moves it to persistent storage.
         client.unpause_contract(&admin);

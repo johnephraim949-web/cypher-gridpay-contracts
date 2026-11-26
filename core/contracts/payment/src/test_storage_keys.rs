@@ -791,8 +791,8 @@ fn test_namespaced_keys_hold_independent_values() {
 /// however long the whitelist gets.
 mod instance_budget {
     use crate::storage::{
-        assert_instance_storage_within_budget, instance_storage_xdr_len, MAX_INSTANCE_STORAGE_BYTES,
-        SHARD_CAPACITY,
+        assert_instance_storage_within_budget, instance_storage_xdr_len,
+        MAX_INSTANCE_STORAGE_BYTES, SHARD_CAPACITY,
     };
     use crate::{ConfigKey, DataKey, PaymentContract, PaymentContractClient};
     use soroban_sdk::{testutils::Address as _, Address, Env, Vec};

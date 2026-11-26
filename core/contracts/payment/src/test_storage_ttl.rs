@@ -268,7 +268,12 @@ mod tiered_ttl {
         let contract_id = env.register(PaymentContract, ());
         let client = PaymentContractClient::new(env, &contract_id);
         client.initialize(&Address::generate(env));
-        (client, contract_id, Address::generate(env), Address::generate(env))
+        (
+            client,
+            contract_id,
+            Address::generate(env),
+            Address::generate(env),
+        )
     }
 
     fn pay(env: &Env, client: &PaymentContractClient, customer: &Address, expires_in: u64) -> u64 {
@@ -298,7 +303,11 @@ mod tiered_ttl {
             PaymentContract::payment_storage_tier(&PaymentStatus::PartialRefunded),
             StorageTier::StandardActive
         );
-        for done in [PaymentStatus::Completed, PaymentStatus::Refunded, PaymentStatus::Cancelled] {
+        for done in [
+            PaymentStatus::Completed,
+            PaymentStatus::Refunded,
+            PaymentStatus::Cancelled,
+        ] {
             assert_eq!(
                 PaymentContract::payment_storage_tier(&done),
                 StorageTier::TerminalAuditRecord
@@ -314,7 +323,10 @@ mod tiered_ttl {
         let expires_at = client.get_payment(&id).expires_at;
 
         let ttl = instance_ttl(&env, &contract_id);
-        assert!(covers(&env, ttl, expires_at), "TTL {ttl} ends before expiry + grace");
+        assert!(
+            covers(&env, ttl, expires_at),
+            "TTL {ttl} ends before expiry + grace"
+        );
         assert!(ttl > StorageTier::CriticalActiveLock.bump_amount());
     }
 
@@ -328,7 +340,10 @@ mod tiered_ttl {
 
         advance_ledgers(&env, 90 * DAY_IN_LEDGERS);
         let before = instance_ttl(&env, &contract_id);
-        assert_eq!(client.batch_bump_critical(&vec![&env, pending, cancelled, 4242]), 1);
+        assert_eq!(
+            client.batch_bump_critical(&vec![&env, pending, cancelled, 4242]),
+            1
+        );
         let after = instance_ttl(&env, &contract_id);
         assert!(after > before);
         assert!(covers(&env, after, client.get_payment(&pending).expires_at));

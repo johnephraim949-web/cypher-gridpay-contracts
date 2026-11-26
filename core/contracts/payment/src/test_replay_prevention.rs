@@ -60,7 +60,11 @@ fn test_signature_replay_across_channels_rejected() {
 
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id_1, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id_1,
+            &merchant_amount,
+            &nonce,
+        ),
     );
 
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
@@ -70,7 +74,10 @@ fn test_signature_replay_across_channels_rejected() {
     client.settle_channel(&channel_id_1, &merchant_amount, &nonce, &sig_bn);
 
     let result = client.try_settle_channel(&channel_id_2, &merchant_amount, &nonce, &sig_bn);
-    assert!(result.is_err(), "Cross-channel signature replay must be rejected");
+    assert!(
+        result.is_err(),
+        "Cross-channel signature replay must be rejected"
+    );
 }
 
 #[test]
@@ -113,7 +120,11 @@ fn test_stale_nonce_replay_rejected() {
 
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &nonce,
+        ),
     );
 
     let msg_vec: alloc::vec::Vec<u8> = msg.iter().collect();
@@ -125,7 +136,11 @@ fn test_stale_nonce_replay_rejected() {
     let stale_nonce: u64 = 1u64;
     // The domain-bound settle digest (channels.rs) is what gets signed.
     let msg2 = Bytes::from(
-        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(&channel_id, &merchant_amount, &stale_nonce),
+        PaymentContractClient::new(&env, &contract_id).channel_settle_digest(
+            &channel_id,
+            &merchant_amount,
+            &stale_nonce,
+        ),
     );
 
     let msg_vec2: alloc::vec::Vec<u8> = msg2.iter().collect();
@@ -163,8 +178,14 @@ fn open_channel(env: &Env) -> Channel<'_> {
 
     let signing_key = SigningKey::generate(&mut OsRng);
     let customer_pk = BytesN::<32>::from_array(env, &signing_key.verifying_key().to_bytes());
-    let channel_id =
-        client.open_channel(&customer, &merchant, &token_id, &5_000i128, &0u64, &customer_pk);
+    let channel_id = client.open_channel(
+        &customer,
+        &merchant,
+        &token_id,
+        &5_000i128,
+        &0u64,
+        &customer_pk,
+    );
     Channel {
         env: env.clone(),
         contract_id,
@@ -203,12 +224,18 @@ fn test_cross_network_replay_rejected() {
 
     // ...submitted on another: the network id is part of the domain.
     env.ledger().set_network_id([9u8; 32]);
-    let result = c.client.try_settle_channel(&c.channel_id, &100, &1, &testnet_sig);
-    assert!(result.is_err(), "a signature from another network must be rejected");
+    let result = c
+        .client
+        .try_settle_channel(&c.channel_id, &100, &1, &testnet_sig);
+    assert!(
+        result.is_err(),
+        "a signature from another network must be rejected"
+    );
 
     // Back on the network it was signed for, it is valid.
     env.ledger().set_network_id([7u8; 32]);
-    c.client.settle_channel(&c.channel_id, &100, &1, &testnet_sig);
+    c.client
+        .settle_channel(&c.channel_id, &100, &1, &testnet_sig);
 }
 
 #[test]
@@ -225,7 +252,14 @@ fn test_cross_contract_replay_rejected() {
     let customer = Address::generate(&env);
     token::StellarAssetClient::new(&env, &token_id).mint(&customer, &10_000i128);
     let pk = BytesN::<32>::from_array(&env, &a.signing_key.verifying_key().to_bytes());
-    let b_channel = b.open_channel(&customer, &Address::generate(&env), &token_id, &5_000i128, &0u64, &pk);
+    let b_channel = b.open_channel(
+        &customer,
+        &Address::generate(&env),
+        &token_id,
+        &5_000i128,
+        &0u64,
+        &pk,
+    );
     assert_eq!(b_channel, a.channel_id);
 
     let sig_for_a = a.sign_digest(&a.client.channel_settle_digest(&a.channel_id, &100, &1));
@@ -235,7 +269,10 @@ fn test_cross_contract_replay_rejected() {
         "digests differ per contract instance"
     );
     let result = b.try_settle_channel(&b_channel, &100, &1, &sig_for_a);
-    assert!(result.is_err(), "a signature for another contract must be rejected");
+    assert!(
+        result.is_err(),
+        "a signature for another contract must be rejected"
+    );
 }
 
 #[test]
@@ -247,11 +284,20 @@ fn test_cross_action_replay_rejected() {
         let struct_hash = channels::channel_settle_struct_hash(&env, c.channel_id, 100, 1);
         channels::signing_digest(&env, "channel_close", &struct_hash)
     });
-    assert_ne!(other_action_digest, c.client.channel_settle_digest(&c.channel_id, &100, &1));
-    let result = c
-        .client
-        .try_settle_channel(&c.channel_id, &100, &1, &c.sign_digest(&other_action_digest));
-    assert!(result.is_err(), "a signature for another action must be rejected");
+    assert_ne!(
+        other_action_digest,
+        c.client.channel_settle_digest(&c.channel_id, &100, &1)
+    );
+    let result = c.client.try_settle_channel(
+        &c.channel_id,
+        &100,
+        &1,
+        &c.sign_digest(&other_action_digest),
+    );
+    assert!(
+        result.is_err(),
+        "a signature for another action must be rejected"
+    );
 }
 
 #[test]
@@ -265,7 +311,9 @@ fn test_pre_domain_message_format_rejected() {
     msg.append(&1u64.to_xdr(&env));
     msg.append(&c.contract_id.clone().to_xdr(&env));
     let raw: alloc::vec::Vec<u8> = msg.iter().collect();
-    let result = c.client.try_settle_channel(&c.channel_id, &100, &1, &c.sign(&raw));
+    let result = c
+        .client
+        .try_settle_channel(&c.channel_id, &100, &1, &c.sign(&raw));
     assert!(result.is_err(), "an undomained signature must be rejected");
 }
 
@@ -296,7 +344,10 @@ fn test_digest_matches_documented_byte_layout() {
     assert_eq!(pre.len(), 66);
     let expected = env.crypto().sha256(&pre).to_bytes();
 
-    assert_eq!(c.client.channel_settle_digest(&c.channel_id, &250, &4), expected);
+    assert_eq!(
+        c.client.channel_settle_digest(&c.channel_id, &250, &4),
+        expected
+    );
 }
 
 #[test]

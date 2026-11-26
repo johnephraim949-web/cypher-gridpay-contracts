@@ -1,6 +1,6 @@
 // Core types and data structures for the payment contract
 
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 use crate::storage::MerchantDataKey;
 
@@ -92,6 +92,38 @@ pub enum FeeTier {
     Standard,
     Premium,    // >= configured premium volume
     Enterprise, // >= configured enterprise volume
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct RebatePool {
+    pub pool_id: u64,
+    pub sponsor: Address,
+    pub token: Address,
+    pub merkle_root: BytesN<32>,
+    pub total_funded: i128,
+    pub total_claimed: i128,
+    pub expires_at: u64,
+pub enum RoundingMode {
+    RoundUpToUnit(i128),
+    FixedBps(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub struct RoundingAddonConfig {
+    pub beneficiary: Address,
+    pub mode: RoundingMode,
+    pub max_addon_amount: i128,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub enum TokenLifecycleStatus {
+    Active,
+    DrainOnly,
+    Removed,
 }
 
 // ============================================================================
@@ -570,6 +602,22 @@ pub struct MerchantRebateAccrual {
 }
 
 // ============================================================================
+// PREPAID VAULTS
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct PrepaidVault {
+    pub vault_id: u64,
+    pub owner: Address,
+    pub merchant: Option<Address>,
+    pub token: Address,
+    pub balance: i128,
+    pub expires_at: Option<u64>,
+    pub transferable: bool,
+}
+
+// ============================================================================
 // PAYMENT CHANNEL AND SPLITS
 // ============================================================================
 
@@ -630,6 +678,8 @@ pub struct MeteredSubscription {
     pub billing_cap: Option<i128>,
     pub last_reset_at: u64,
     pub max_units_per_period: Option<u64>,
+    /// Accrued cost of TOU-priced usage in the current billing cycle.
+    pub accumulated_cost: i128,
 }
 
 // ============================================================================
@@ -717,6 +767,44 @@ pub struct PaymentMemo {
 // ============================================================================
 // PLACEHOLDER STRUCT FOR CONTRACT MARKER
 // ============================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct StorefrontConfig {
+    pub storefront_id: Symbol,
+    pub parent_merchant: Address,
+    pub payout_destination: Address,
+    pub active: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct StorefrontPaymentRoute {
+    pub parent_merchant: Address,
+    pub storefront_id: Symbol,
+}
+
+// ============================================================================
+// TIME-OF-USE TARIFFS
+// ============================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct TariffBand {
+    pub start_minute_utc: u32,
+    pub end_minute_utc: u32,
+    pub rate_per_unit: i128,
+    pub weekend_discount_bps: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[contracttype]
+pub struct TariffSchedule {
+    pub schedule_id: u64,
+    pub bands: Vec<TariffBand>,
+    pub effective_from: u64,
+    pub active: bool,
+}
 
 #[derive(Clone)]
 pub struct PaymentContract;

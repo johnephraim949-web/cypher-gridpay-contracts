@@ -1,0 +1,224 @@
+# PR preview environments (issue #376).
+#
+# Applying the `deploy-preview` label to a same-repository PR builds the
+# contracts, deploys ephemeral instances to Stellar Testnet, builds the Web
+# Console as a static site (Cloudflare Pages branch deployment) and posts ONE
+# sticky comment with the preview URL, contract IDs, Stellar Expert links and
+# WASM sizes. Teardown lives in pr-preview-cleanup.yml.
+#
+# Security model
+# - Trigger is `pull_request` (NOT `pull_request_target`): for PRs from forks
+#   GitHub withholds secrets and gives a read-only token, and the job is also
+#   skipped explicitly by the head-repo check below.
+# - Deployment secrets live in the `pr-preview` GitHub Environment (configure
+#   required reviewers / deployment branch rules there as an extra gate).
+# - The label must have been applied by a user with write/maintain/admin
+#   permission; later pushes only redeploy while the label is still present.
+# - No PR-controlled string (title, branch name, ...) is interpolated into a
+#   shell script; only numeric/identifier values reach `run:` via `env:`.
+#
+# Maintainer setup required: see the PR description that introduced this file.
+
+name: PR Preview
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy preview
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: pr-preview
+    # Same-repo PRs only; `labeled` must be the deploy-preview label, other
+    # events require the label to already be on the PR.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'deploy-preview') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'deploy-preview')
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      CF_PAGES_PROJECT: ${{ vars.CF_PAGES_PROJECT }}
+    steps:
+      - name: Verify the actor is a trusted maintainer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.event.sender.login }}
+        run: |
+          perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${ACTOR}/permission" --jq .permission)
+          case "$perm" in
+            admin|maintain|write) echo "Actor permission: $perm" ;;
+            *) echo "::error::${ACTOR} has '$perm' permission; deploy-preview requires write access."; exit 1 ;;
+          esac
+
+      - name: Checkout PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32v1-none
+
+      - name: Install Stellar CLI
+        # Slow (compiles from source). Replace with a pinned prebuilt binary
+        # or a cache once the preferred install method is agreed.
+        run: cargo install --locked stellar-cli
+
+      - name: Prepare Testnet deployer identity
+        env:
+          PREVIEW_ADMIN_SECRET: ${{ secrets.PREVIEW_ADMIN_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -n "${PREVIEW_ADMIN_SECRET:-}" ]; then
+            # Dedicated preview CI wallet (must be funded on Testnet).
+            echo "::add-mask::${PREVIEW_ADMIN_SECRET}"
+            printf '%s' "${PREVIEW_ADMIN_SECRET}" | stellar keys add admin --secret-key
+          else
+            # Fallback: throwaway key funded by Friendbot.
+            stellar keys generate admin --network testnet --fund
+          fi
+          admin_secret=$(stellar keys show admin)
+          echo "::add-mask::${admin_secret}"
+          echo "ADMIN_ADDRESS=$(stellar keys address admin)" >> "$GITHUB_ENV"
+          echo "ADMIN_SECRET=${admin_secret}" >> "$GITHUB_ENV"
+
+      - name: Build and deploy contracts to Testnet
+        # scripts/deploy-testnet.sh runs `make build` in core/ and
+        # orchestrator/, deploys the four contracts, and writes
+        # deployment-manifest.json.
+        run: ./scripts/deploy-testnet.sh testnet
+
+      - name: Collect contract IDs and WASM sizes
+        id: contracts
+        run: |
+          set -euo pipefail
+          for name in payment escrow refund admin; do
+            id=$(jq -r ".contracts.${name}" deployment-manifest.json)
+            echo "${name}_id=${id}" >> "$GITHUB_OUTPUT"
+          done
+          size() { stat -c %s "$1" 2>/dev/null || echo "n/a"; }
+          echo "payment_size=$(size core/target/wasm32v1-none/release/payment.wasm)" >> "$GITHUB_OUTPUT"
+          echo "escrow_size=$(size core/target/wasm32v1-none/release/escrow.wasm)" >> "$GITHUB_OUTPUT"
+          echo "refund_size=$(size core/target/wasm32v1-none/release/refund.wasm)" >> "$GITHUB_OUTPUT"
+          echo "admin_size=$(size orchestrator/target/wasm32v1-none/release/admin.wasm)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+
+      - name: Regenerate TypeScript SDK bindings
+        # NOTE: scripts/generate-ts-bindings.sh generates bindings from the
+        # built WASM files; it does not itself take the preview contract IDs.
+        # The IDs are exported in a preview-contracts.json for downstream use.
+        run: |
+          set -euo pipefail
+          ./scripts/generate-ts-bindings.sh ts-sdk
+          jq '.contracts' deployment-manifest.json > preview-contracts.json
+
+      - name: Build Web Console (if present)
+        id: web
+        env:
+          PAYMENT_ID: ${{ steps.contracts.outputs.payment_id }}
+          ESCROW_ID: ${{ steps.contracts.outputs.escrow_id }}
+          REFUND_ID: ${{ steps.contracts.outputs.refund_id }}
+          ADMIN_ID: ${{ steps.contracts.outputs.admin_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f apps/web/package.json ]; then
+            echo "apps/web/package.json not found: skipping frontend preview."
+            echo "built=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          cd apps/web
+          npm ci
+          # The framework env-var prefix is not known; export both common ones.
+          export VITE_PAYMENT_CONTRACT_ID="$PAYMENT_ID" NEXT_PUBLIC_PAYMENT_CONTRACT_ID="$PAYMENT_ID"
+          export VITE_ESCROW_CONTRACT_ID="$ESCROW_ID" NEXT_PUBLIC_ESCROW_CONTRACT_ID="$ESCROW_ID"
+          export VITE_REFUND_CONTRACT_ID="$REFUND_ID" NEXT_PUBLIC_REFUND_CONTRACT_ID="$REFUND_ID"
+          export VITE_ADMIN_CONTRACT_ID="$ADMIN_ID" NEXT_PUBLIC_ADMIN_CONTRACT_ID="$ADMIN_ID"
+          export VITE_STELLAR_NETWORK=testnet NEXT_PUBLIC_STELLAR_NETWORK=testnet
+          npm run build
+          # Output directory depends on the framework (Vite: dist, Next export: out).
+          out=""
+          for d in dist out build; do [ -d "$d" ] && out="$d" && break; done
+          [ -n "$out" ] || { echo "::error::no build output directory found"; exit 1; }
+          # Persistent banner, injected independently of the framework.
+          banner='<div style="position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#b91c1c;color:#fff;text-align:center;font:600 13px/28px sans-serif">EPHEMERAL PR PREVIEW &mdash; TESTNET ONLY</div>'
+          if [ -f "$out/index.html" ]; then
+            BANNER="$banner" perl -0pi -e 's/(<body[^>]*>)/$1$ENV{BANNER}/i' "$out/index.html"
+            grep -q "EPHEMERAL PR PREVIEW" "$out/index.html" || { echo "::error::banner injection failed"; exit 1; }
+          fi
+          jq -n --arg p "$PAYMENT_ID" --arg e "$ESCROW_ID" --arg r "$REFUND_ID" --arg a "$ADMIN_ID" \
+            '{network:"testnet",payment:$p,escrow:$e,refund:$r,admin:$a}' > "$out/preview-config.json"
+          echo "built=true" >> "$GITHUB_OUTPUT"
+          echo "dir=apps/web/$out" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Web Console to Cloudflare Pages
+        id: pages
+        if: steps.web.outputs.built == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          OUT_DIR: ${{ steps.web.outputs.dir }}
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@3 pages deploy "$OUT_DIR" \
+            --project-name "$CF_PAGES_PROJECT" --branch "pr-${PR_NUMBER}" --commit-dirty=true
+          echo "url=https://pr-${PR_NUMBER}.${CF_PAGES_PROJECT}.pages.dev" >> "$GITHUB_OUTPUT"
+
+      - name: Post or update sticky PR comment
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PREVIEW_URL: ${{ steps.pages.outputs.url }}
+          PAYMENT_ID: ${{ steps.contracts.outputs.payment_id }}
+          ESCROW_ID: ${{ steps.contracts.outputs.escrow_id }}
+          REFUND_ID: ${{ steps.contracts.outputs.refund_id }}
+          ADMIN_ID: ${{ steps.contracts.outputs.admin_id }}
+          PAYMENT_SIZE: ${{ steps.contracts.outputs.payment_size }}
+          ESCROW_SIZE: ${{ steps.contracts.outputs.escrow_size }}
+          REFUND_SIZE: ${{ steps.contracts.outputs.refund_size }}
+          ADMIN_SIZE: ${{ steps.contracts.outputs.admin_size }}
+        with:
+          script: |
+            const marker = '<!-- pr-preview -->';
+            const e = process.env;
+            const link = (id) => `[\`${id}\`](https://stellar.expert/explorer/testnet/contract/${id})`;
+            const body = [
+              marker,
+              '### PR preview (EPHEMERAL, TESTNET ONLY)',
+              '',
+              `Commit: \`${context.payload.pull_request.head.sha.slice(0, 7)}\``,
+              `Web Console: ${e.PREVIEW_URL ? e.PREVIEW_URL : '_not built (no apps/web/package.json)_'}`,
+              '',
+              '| Contract | ID (Stellar Expert) | WASM size (bytes) |',
+              '| --- | --- | --- |',
+              `| payment | ${link(e.PAYMENT_ID)} | ${e.PAYMENT_SIZE} |`,
+              `| escrow | ${link(e.ESCROW_ID)} | ${e.ESCROW_SIZE} |`,
+              `| refund | ${link(e.REFUND_ID)} | ${e.REFUND_SIZE} |`,
+              `| admin | ${link(e.ADMIN_ID)} | ${e.ADMIN_SIZE} |`,
+              '',
+              'Torn down when the PR is closed or the `deploy-preview` label is removed. Testnet contract instances cannot be deleted; they are abandoned and expire with their ledger TTL.',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

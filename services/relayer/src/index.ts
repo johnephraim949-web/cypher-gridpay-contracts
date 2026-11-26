@@ -10,6 +10,7 @@ import { PolicyEngine } from "./policyEngine.js";
 import { RelayerService } from "./relayer.js";
 import { HttpSorobanRpc } from "./rpc.js";
 import { RemoteKmsSigner } from "./signer.js";
+import { initTelemetry, type TelemetryHandle } from "./telemetry.js";
 import type { AlertSink, Logger, RelayerConfig, SponsorResult, SponsorshipLedger } from "./types.js";
 
 class PayloadTooLargeError extends RelayerError {
@@ -41,6 +42,21 @@ async function readBody(request: IncomingMessage, maxBodyBytes: number): Promise
   }
 }
 
+function extractCorrelation(request: IncomingMessage): Record<string, string> {
+  const correlation: Record<string, string> = {};
+  const traceparent = request.headers["traceparent"];
+  if (typeof traceparent === "string") {
+    const parts = traceparent.split("-");
+    if (parts.length >= 3 && parts[1] !== undefined && parts[2] !== undefined) {
+      correlation["trace_id"] = parts[1];
+      correlation["span_id"] = parts[2];
+    }
+  }
+  const requestId = request.headers["x-request-id"];
+  if (typeof requestId === "string") correlation["request_id"] = requestId;
+  return correlation;
+}
+
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
@@ -67,18 +83,24 @@ export function createServer(deps: ServerDeps): Server {
       return;
     }
     void (async () => {
+      const correlation = extractCorrelation(request);
       try {
         const payload = await readBody(request, deps.maxBodyBytes);
         const result = await deps.relayer.sponsor(payload);
         sendJson(response, 200, result);
       } catch (error) {
         if (error instanceof RelayerError) {
+          deps.logger.warn("relayer request rejected", {
+            ...correlation,
+            code: error.code,
+            status: error.httpStatus,
+          });
           sendJson(response, error.httpStatus, {
             error: { code: error.code, message: error.message, details: error.details },
           });
           return;
         }
-        deps.logger.error("unhandled relayer failure", { error: String(error) });
+        deps.logger.error("unhandled relayer failure", { ...correlation, error: String(error) });
         sendJson(response, 500, { error: { code: "INTERNAL_ERROR", message: "Internal relayer error" } });
       }
     })();
@@ -132,7 +154,14 @@ export function buildRelayer(config: RelayerConfig, logger: Logger = new Console
 
 export function main(): void {
   const config = loadConfig();
-  const logger = new ConsoleLogger();
+  let telemetry: TelemetryHandle | undefined;
+  try {
+    telemetry = initTelemetry(config);
+  } catch (error) {
+    // Tracing must never prevent the relayer from starting.
+    process.stderr.write(`telemetry initialization failed: ${String(error)}\n`);
+  }
+  const logger = telemetry?.logger ?? new ConsoleLogger();
   const server = createServer({
     relayer: buildRelayer(config, logger),
     logger,
@@ -143,7 +172,17 @@ export function main(): void {
   });
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.on(signal, () => {
-      server.close(() => process.exit(0));
+      server.close(() => {
+        void (async () => {
+          try {
+            await telemetry?.shutdown();
+          } catch (error) {
+            process.stderr.write(`telemetry shutdown failed: ${String(error)}\n`);
+          } finally {
+            process.exit(0);
+          }
+        })();
+      });
     });
   }
 }

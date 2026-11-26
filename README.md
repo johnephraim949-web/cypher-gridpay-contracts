@@ -167,10 +167,12 @@ deployment details.
 
 ## 🔗 Links
 
+- [Merchant Integration Guide](docs/MERCHANT_INTEGRATION_GUIDE.md)
 - [TypeScript SDK](sdk/typescript/README.md)
 - [Python SDK](docs/PYTHON_SDK.md)
 - [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
 - [Storage Restoration Guide](docs/STORAGE_RESTORATION.md)
+- [Subscriptions, Metered Billing, Dunning & Streaming Guide](docs/SUBSCRIPTIONS_AND_STREAMING_GUIDE.md)
 - Telegram: https://t.me/+afM9uh7GGtVkYmZk
 - [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
 - [SDK Repository](https://github.com/cypher-gridpay/cypher-gridpay-sdk)

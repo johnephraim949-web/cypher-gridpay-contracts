@@ -21,6 +21,36 @@ log_info()  { echo -e "${GREEN}[INFO]${NC} $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+# ── Mainnet Guard ──────────────────────────────────────────────────────────
+# This script must never target Stellar Mainnet. Abort if the network name,
+# network passphrase, or RPC URL resolves to Mainnet.
+MAINNET_PASSPHRASE="Public Global Stellar Network ; September 2015"
+MAINNET_RPC_HOST="soroban-mainnet.stellar.org"
+
+assert_not_mainnet() {
+    local network_name="${1:-}"
+    local passphrase="${2:-${STELLAR_NETWORK_PASSPHRASE:-}}"
+    local rpc_url="${3:-${SOROBAN_RPC_URL:-${STELLAR_RPC_URL:-}}}"
+
+    if [[ "${network_name}" == "mainnet" || "${network_name}" == "public" ]]; then
+        log_error "Refusing to run against Stellar Mainnet (network='${network_name}')."
+        exit 1
+    fi
+
+    if [[ -n "${passphrase}" && "${passphrase}" == "${MAINNET_PASSPHRASE}" ]]; then
+        log_error "Refusing to run: STELLAR_NETWORK_PASSPHRASE matches Stellar Mainnet."
+        exit 1
+    fi
+
+    if [[ -n "${rpc_url}" && "${rpc_url}" == *"${MAINNET_RPC_HOST}"* ]]; then
+        log_error "Refusing to run: RPC URL '${rpc_url}' points at Stellar Mainnet."
+        exit 1
+    fi
+}
+
+assert_not_mainnet "${NETWORK}"
+=======
+
 # ── Prerequisites ──────────────────────────────────────────────────────────
 command -v stellar >/dev/null 2>&1 || { log_error "Stellar CLI not found. Install: cargo install --locked stellar-cli --features opt"; exit 1; }
 command -v jq >/dev/null 2>&1 || { log_error "jq not found. Install: brew install jq / apt-get install jq"; exit 1; }
@@ -172,3 +202,161 @@ echo "  Payment: ${PAYMENT_ID}"
 echo "  Escrow:  ${ESCROW_ID}"
 echo "  Refund:  ${REFUND_ID}"
 echo "  Admin:   ${ADMIN_CONTRACT_ID}"
+
+# ── Canary Helper Subcommands ──────────────────────────────────────────────
+# These helpers are invoked by .github/workflows/testnet-canary-upgrade.yml so
+# the canary pipeline reuses the same deployment logic. They are dispatched
+# when the first argument is a known subcommand.
+#
+#   deploy-testnet.sh dry-run-migrate <contract-id> [--chunk-size N]
+#   deploy-testnet.sh migrate-step    <contract-id> [--chunk-size N]
+#   deploy-testnet.sh migrate-until-complete <contract-id> [--chunk-size N]
+#   deploy-testnet.sh emergency-pause-all
+#
+# All helpers enforce the Mainnet guard before touching the network.
+
+resolve_contract_id() {
+    local name="$1"
+    if [[ -z "${name}" ]]; then
+        log_error "Contract name/ID is required."
+        exit 1
+    fi
+    # Allow either a raw contract ID or a manifest key (payment/escrow/refund/admin).
+    if [[ -f "${MANIFEST_FILE}" ]]; then
+        local resolved
+        resolved=$(jq -r --arg k "${name}" '.contracts[$k] // empty' "${MANIFEST_FILE}" 2>/dev/null || true)
+        if [[ -n "${resolved}" ]]; then
+            echo "${resolved}"
+            return 0
+        fi
+    fi
+    echo "${name}"
+}
+
+require_admin_secret() {
+    if [[ -z "${ADMIN_SECRET}" ]]; then
+        log_error "ADMIN_SECRET (or a Stellar CLI 'admin' identity) is required for this operation."
+        exit 1
+    fi
+}
+
+cmd_dry_run_migrate() {
+    local contract_ref="$1"; shift || true
+    local chunk_size="100"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --chunk-size) chunk_size="$2"; shift 2 ;;
+            *) log_error "Unknown argument: $1"; exit 1 ;;
+        esac
+    done
+    assert_not_mainnet "${NETWORK}"
+    local contract_id
+    contract_id=$(resolve_contract_id "${contract_ref}")
+    log_info "Dry-run schema migration on ${contract_id} (chunk_size=${chunk_size})..."
+    stellar contract invoke \
+        --id "${contract_id}" \
+        --source "${ADMIN_SECRET}" \
+        --network "${NETWORK}" \
+        -- dry_run_migrate_schema \
+        --chunk_size "${chunk_size}" 2>&1
+}
+
+cmd_migrate_step() {
+    local contract_ref="$1"; shift || true
+    local chunk_size="100"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --chunk-size) chunk_size="$2"; shift 2 ;;
+            *) log_error "Unknown argument: $1"; exit 1 ;;
+        esac
+    done
+    assert_not_mainnet "${NETWORK}"
+    require_admin_secret
+    local contract_id
+    contract_id=$(resolve_contract_id "${contract_ref}")
+    log_info "Running migrate_schema_step on ${contract_id} (chunk_size=${chunk_size})..."
+    stellar contract invoke \
+        --id "${contract_id}" \
+        --source "${ADMIN_SECRET}" \
+        --network "${NETWORK}" \
+        -- migrate_schema_step \
+        --chunk_size "${chunk_size}" 2>&1
+}
+
+cmd_migrate_until_complete() {
+    local contract_ref="$1"; shift || true
+    local chunk_size="100"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --chunk-size) chunk_size="$2"; shift 2 ;;
+            *) log_error "Unknown argument: $1"; exit 1 ;;
+        esac
+    done
+    assert_not_mainnet "${NETWORK}"
+    require_admin_secret
+    local contract_id
+    contract_id=$(resolve_contract_id "${contract_ref}")
+    local max_iterations="${MIGRATION_MAX_ITERATIONS:-1000}"
+    local iteration=0
+    while (( iteration < max_iterations )); do
+        iteration=$((iteration + 1))
+        log_info "Migration step ${iteration} on ${contract_id}..."
+        stellar contract invoke \
+            --id "${contract_id}" \
+            --source "${ADMIN_SECRET}" \
+            --network "${NETWORK}" \
+            -- migrate_schema_step \
+            --chunk_size "${chunk_size}" 2>&1
+
+        local cursor
+        cursor=$(stellar contract invoke \
+            --id "${contract_id}" \
+            --source "${ADMIN_SECRET}" \
+            --network "${NETWORK}" \
+            -- get_migration_cursor 2>&1 | tail -1)
+        log_info "Migration cursor: ${cursor}"
+        # Cursor is considered complete when it reports a terminal/complete state.
+        if [[ "${cursor}" == *"complete"* || "${cursor}" == *"Complete"* || "${cursor}" == "0" ]]; then
+            log_info "Migration completed after ${iteration} step(s)."
+            return 0
+        fi
+    done
+    log_error "Migration did not complete within ${max_iterations} iterations."
+    exit 1
+}
+
+cmd_emergency_pause_all() {
+    assert_not_mainnet "${NETWORK}"
+    require_admin_secret
+    local admin_id
+    admin_id=$(resolve_contract_id "admin")
+    log_warn "Triggering emergency_pause_all on Admin contract ${admin_id}..."
+    stellar contract invoke \
+        --id "${admin_id}" \
+        --source "${ADMIN_SECRET}" \
+        --network "${NETWORK}" \
+        -- emergency_pause_all 2>&1
+}
+
+# Dispatch subcommands (only when the first arg is a known helper).
+case "${NETWORK}" in
+    dry-run-migrate)
+        shift
+        cmd_dry_run_migrate "$@"
+        exit $?
+        ;;
+    migrate-step)
+        shift
+        cmd_migrate_step "$@"
+        exit $?
+        ;;
+    migrate-until-complete)
+        shift
+        cmd_migrate_until_complete "$@"
+        exit $?
+        ;;
+    emergency-pause-all)
+        cmd_emergency_pause_all
+        exit $?
+        ;;
+esac
