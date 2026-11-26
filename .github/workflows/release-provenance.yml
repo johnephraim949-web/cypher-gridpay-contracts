@@ -1,0 +1,127 @@
+name: Release Provenance and SBOM
+
+# Builds the optimized Soroban WASM artifacts for a release tag, generates
+# CycloneDX SBOMs, and produces signed provenance (SLSA, Sigstore keyless).
+# Existing ci.yml is intentionally left untouched.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build WASM, checksums and SBOMs
+    runs-on: ubuntu-latest
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install stellar-cli and cargo-cyclonedx
+        run: |
+          cargo install --locked stellar-cli
+          cargo install --locked cargo-cyclonedx
+
+      - name: Build deterministic optimized WASM
+        env:
+          RUSTFLAGS: "-C link-arg=-s --remap-path-prefix=${{ github.workspace }}=/workspace"
+        run: |
+          mkdir -p release
+          for dir in core orchestrator; do
+            (cd "$dir" && cargo build --locked --target wasm32-unknown-unknown --release)
+            for wasm in "$dir"/target/wasm32-unknown-unknown/release/*.wasm; do
+              [ -f "$wasm" ] || continue
+              stellar contract optimize --wasm "$wasm"
+              cp "$wasm" "release/$(basename "$wasm")"
+            done
+          done
+          cd release
+          sha256sum *.wasm > checksums.sha256
+
+      - name: Generate CycloneDX SBOMs
+        run: |
+          (cd core && cargo cyclonedx --format json)
+          (cd orchestrator && cargo cyclonedx --format json)
+          # cargo-cyclonedx writes one <crate>.cdx.json next to each crate; merge the file list.
+          mkdir -p release/sbom
+          find core orchestrator -name '*.cdx.json' -not -path '*/target/*' \
+            | while read -r f; do cp "$f" "release/sbom/$(echo "$f" | tr '/' '_')"; done
+          # SDK SBOMs (CycloneDX npm / py tools, run without touching lockfiles)
+          (cd sdk/typescript && npx --yes @cyclonedx/cyclonedx-npm --output-file ../../release/sbom/sbom-ts-sdk.json) || echo "TS SDK SBOM skipped"
+          (pip install cyclonedx-bom && cd sdk/python && cyclonedx-py environment --of JSON -o ../../release/sbom/sbom-py-sdk.json) || echo "Python SDK SBOM skipped"
+
+      - name: Compute subject hashes for SLSA generator
+        id: hash
+        working-directory: release
+        run: echo "hashes=$(sha256sum *.wasm checksums.sha256 | base64 -w0)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-artifacts
+          path: release/
+          if-no-files-found: error
+
+  attest:
+    name: Sigstore build provenance attestation
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-artifacts
+          path: release/
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            release/*.wasm
+            release/checksums.sha256
+
+  provenance:
+    name: SLSA generic provenance
+    needs: build
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    # The SLSA generator MUST be referenced by tag (not a commit SHA), see
+    # https://github.com/slsa-framework/slsa-github-generator#referencing-slsa-builders-and-generators
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: ${{ startsWith(github.ref, 'refs/tags/') }}
+
+  release-assets:
+    name: Attach artifacts and SBOMs to the release
+    needs: [build, attest, provenance]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-artifacts
+          path: release/
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber \
+            release/*.wasm release/checksums.sha256 release/sbom/*

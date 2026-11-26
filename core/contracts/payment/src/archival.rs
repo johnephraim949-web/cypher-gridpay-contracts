@@ -20,7 +20,7 @@ use soroban_sdk::{
 };
 
 use crate::{
-    BasicError, DataKey, Error, MultiSigConfig, ConfigKey, Payment, PaymentKey, PaymentStatus,
+    BasicError, ConfigKey, DataKey, Error, MultiSigConfig, Payment, PaymentKey, PaymentStatus,
     StateDataKey,
 };
 
@@ -109,14 +109,13 @@ pub fn compact_settled_payments(env: &Env, payment_ids: Vec<u64>) -> Result<u32,
             continue;
         }
         // Funds still held for the merchant: keep the full record.
-        let held = env
-            .storage()
-            .instance()
-            .has(&DataKey::Payment(PaymentKey::PendingSettlement(payment_id)))
-            && !env
-                .storage()
+        let held =
+            env.storage()
                 .instance()
-                .has(&DataKey::State(StateDataKey::SettlementFinalized(payment_id)));
+                .has(&DataKey::Payment(PaymentKey::PendingSettlement(payment_id)))
+                && !env.storage().instance().has(&DataKey::State(
+                    StateDataKey::SettlementFinalized(payment_id),
+                ));
         if held {
             continue;
         }
@@ -146,7 +145,9 @@ pub fn compact_settled_payments(env: &Env, payment_ids: Vec<u64>) -> Result<u32,
             completed_at: seen_at,
             state_hash: state_hash(env, &payment),
         };
-        env.storage().instance().set(&(ARCH_KEY, payment_id), &record);
+        env.storage()
+            .instance()
+            .set(&(ARCH_KEY, payment_id), &record);
         // Issue #243: commit the archived payment to the Merkle accumulator.
         crate::storage::append_archived_leaf(env, record.state_hash.clone());
 
@@ -172,7 +173,9 @@ pub fn compact_settled_payments(env: &Env, payment_ids: Vec<u64>) -> Result<u32,
 /// `payment_id`. Lets off-chain indexers prove historical fields.
 pub fn verify_archived_payment_blob(env: &Env, payment_id: u64, full_payment: Payment) -> bool {
     match get_archived(env, payment_id) {
-        Some(rec) => full_payment.id == payment_id && state_hash(env, &full_payment) == rec.state_hash,
+        Some(rec) => {
+            full_payment.id == payment_id && state_hash(env, &full_payment) == rec.state_hash
+        }
         None => false,
     }
 }

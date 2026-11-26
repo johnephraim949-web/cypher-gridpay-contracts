@@ -1,0 +1,103 @@
+# .github/workflows/budget-comment.yml
+#
+# Fork-safe sticky PR comment reporter for the budget benchmark (issue #378).
+#
+# Why a separate workflow_run workflow?
+#   For pull requests opened from forks, the `GITHUB_TOKEN` available to the
+#   PR-triggered `ci.yml` job is restricted (read-only, no `pull-requests:
+#   write`) and **must not** be exposed to untrusted fork-PR code. The
+#   `workflow_run` trigger runs in the context of the base repository using the
+#   base repo's default token, which *does* have write access — so it can post
+#   the sticky comment on the PR without ever handing a write token to fork-PR
+#   code. This is the GitHub-documented safe pattern.
+#
+# Flow:
+#   1. `ci.yml` → `budget-bench` job runs the bench, compares vs baseline, and
+#      uploads the `budget-comparison` artifact (no comment is posted there).
+#   2. This workflow fires when `CI/CD Pipeline` completes; it downloads the
+#      `budget-comparison` artifact, finds the PR by head SHA, and updates (or
+#      creates) a single sticky comment tagged with an HTML marker so it is
+#      never duplicated across re-runs.
+
+name: Budget Bench PR Comment
+
+on:
+  workflow_run:
+    workflows: ["CI/CD Pipeline"]
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read          # download artifacts from the triggering CI run
+  pull-requests: write   # post / update the sticky comment
+
+jobs:
+  comment:
+    name: Post sticky budget report
+    runs-on: ubuntu-latest
+    # Only act on runs that were triggered by a pull_request (not a push),
+    # so we never comment on main-branch builds.
+    if: ${{ github.event.workflow_run.event == 'pull_request' }}
+    steps:
+      - name: Download budget-comparison artifact
+        id: dl
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          name: budget-comparison
+          github-token: ${{ github.token }}
+          path: artifact
+        continue-on-error: true   # the run may have failed before uploading it
+
+      - name: Find PR by head SHA
+        id: pr
+        if: ${{ steps.dl.outcome == 'success' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = context.payload.workflow_run.head_sha;
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const pr = prs.find(p => p.head.sha === sha);
+            if (!pr) {
+              core.info(`No open PR found for head SHA ${sha}; skipping.`);
+              return;
+            }
+            core.setOutput('number', String(pr.number));
+            core.info(`Matched PR #${pr.number}`);
+
+      - name: Post / update sticky comment
+        if: ${{ steps.pr.outputs.number }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- budget-bench-report -->';
+            let body = MARKER + '\n';
+            try {
+              body += fs.readFileSync('artifact/budget-comparison.md', 'utf8');
+            } catch (e) {
+              core.warning('budget-comparison.md not present in artifact; nothing to post.');
+              return;
+            }
+            const issue_number = Number('${{ steps.pr.outputs.number }}');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const comments = await github.rest.issues.listComments({
+              owner, repo, issue_number, per_page: 100,
+            });
+            const existing = comments.data.find(c => c.body && c.body.startsWith(MARKER));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body,
+              });
+              core.info(`Updated existing budget report comment #${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              core.info('Created new budget report comment');
+            }

@@ -76,7 +76,14 @@ fn test_health_healthy() {
     env.ledger().set_timestamp(1_000);
     // release=2000, expiry far in the future (100_000)
     let id = client.create_escrow(
-        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+        &customer,
+        &merchant,
+        &500_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &100_000_u64,
+        &true,
     );
 
     let report = client.get_escrow_health(&id);
@@ -131,7 +138,14 @@ fn test_health_disputed() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+        &customer,
+        &merchant,
+        &500_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &100_000_u64,
+        &true,
     );
     client.dispute_escrow(&customer, &id);
 
@@ -219,7 +233,6 @@ fn test_get_escrow_health_missing_escrow_fails() {
     assert!(result.is_err());
 }
 
-
 #[test]
 fn test_health_views_leave_ledger_storage_untouched() {
     let env = Env::default();
@@ -228,7 +241,14 @@ fn test_health_views_leave_ledger_storage_untouched() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+        &customer,
+        &merchant,
+        &500_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &100_000_u64,
+        &true,
     );
 
     let before = env.to_ledger_snapshot();
@@ -249,8 +269,14 @@ fn test_health_views_leave_ledger_storage_untouched() {
     for i in 0..before.ledger_entries.len() {
         let (before_key, (before_entry, _before_ttl)) = &before.ledger_entries[i];
         let (after_key, (after_entry, _after_ttl)) = &after.ledger_entries[i];
-        assert!(before_key == after_key, "health_check changed the ledger key set");
-        assert!(before_entry == after_entry, "health_check modified a ledger entry");
+        assert!(
+            before_key == after_key,
+            "health_check changed the ledger key set"
+        );
+        assert!(
+            before_entry == after_entry,
+            "health_check modified a ledger entry"
+        );
     }
 }
 
@@ -262,7 +288,14 @@ fn test_health_views_report_consistent_state() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+        &customer,
+        &merchant,
+        &500_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &100_000_u64,
+        &true,
     );
 
     let token_client = token::Client::new(&env, &token);
@@ -298,7 +331,14 @@ fn test_poke_stale_escrow_succeeds() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
 
     // Advance past inactivity window so escrow is Stale.
@@ -323,7 +363,14 @@ fn test_poke_stale_escrow_healthy_fails() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &100_000_u64, &true,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &100_000_u64,
+        &true,
     );
 
     // Still healthy — poke must fail.
@@ -341,7 +388,14 @@ fn test_poke_stale_escrow_bounty_disabled_fails() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
     env.ledger().set_timestamp(12_000);
 
@@ -358,7 +412,14 @@ fn test_poke_stale_expired_escrow_succeeds() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &5_000_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &5_000_u64,
+        &false,
     );
     // Past expiry.
     env.ledger().set_timestamp(6_000);
@@ -369,7 +430,10 @@ fn test_poke_stale_expired_escrow_succeeds() {
     let keeper = Address::generate(&env);
     let result = client.try_poke_stale_escrow(&id, &keeper);
     assert!(result.is_ok());
-    assert_eq!(client.get_escrow(&id).status, EscrowStatus::DormantNoticePeriod);
+    assert_eq!(
+        client.get_escrow(&id).status,
+        EscrowStatus::DormantNoticePeriod
+    );
 }
 
 #[test]
@@ -380,7 +444,14 @@ fn test_poke_disputed_escrow_fails() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
 
     client.dispute_escrow(&customer, &id);
@@ -412,7 +483,14 @@ fn test_settle_dormant_escrow_full_flow_customer_favor() {
 
     // auto_resolve_in_favor_of defaults to Customer in create_escrow.
     let id = client.create_escrow(
-        &customer, &merchant, &10_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &10_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
 
     // Advance past inactivity window.
@@ -437,7 +515,10 @@ fn test_settle_dormant_escrow_full_flow_customer_favor() {
     // Keeper received bounty.
     assert_eq!(token_client.balance(&keeper), keeper_balance_before + 50);
     // Customer received principal (10000 - 100 fee = 9900).
-    assert_eq!(token_client.balance(&customer), customer_balance_before + 9_900);
+    assert_eq!(
+        token_client.balance(&customer),
+        customer_balance_before + 9_900
+    );
 
     // Escrow is Resolved.
     let escrow = client.get_escrow(&id);
@@ -452,7 +533,14 @@ fn test_settle_dormant_escrow_grace_not_elapsed_fails() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
     env.ledger().set_timestamp(12_000);
 
@@ -474,7 +562,14 @@ fn test_settle_without_poke_fails() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
     env.ledger().set_timestamp(12_000);
 
@@ -492,7 +587,14 @@ fn test_buyer_activity_during_dormant_window_resets_escrow() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
     env.ledger().set_timestamp(12_000);
 
@@ -527,7 +629,7 @@ fn test_settle_dormant_max_cap_applied() {
     client.set_stale_threshold(&admin, &config);
 
     let fee_config = EscrowFeeConfig {
-        fee_bps: 1_000_i128,          // 10% fee
+        fee_bps: 1_000_i128, // 10% fee
         fee_recipient: admin.clone(),
         enabled: true,
     };
@@ -536,7 +638,14 @@ fn test_settle_dormant_max_cap_applied() {
     env.ledger().set_timestamp(1_000);
     // amount = 1000; fee = 100; bounty_raw = 50; cap = 10 → bounty = 10
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
     env.ledger().set_timestamp(12_000);
 
@@ -558,7 +667,14 @@ fn test_poke_stale_emits_event() {
 
     env.ledger().set_timestamp(1_000);
     let id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token,
+        &2_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
     env.ledger().set_timestamp(12_000);
 
@@ -567,5 +683,8 @@ fn test_poke_stale_emits_event() {
     let result = client.try_poke_stale_escrow(&id, &keeper);
     assert!(result.is_ok());
     // Verify state change as observable proof of the event-emitting path.
-    assert_eq!(client.get_escrow(&id).status, EscrowStatus::DormantNoticePeriod);
+    assert_eq!(
+        client.get_escrow(&id).status,
+        EscrowStatus::DormantNoticePeriod
+    );
 }

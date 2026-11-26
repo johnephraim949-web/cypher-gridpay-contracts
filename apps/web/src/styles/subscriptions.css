@@ -1,0 +1,170 @@
+.gp-usage-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+.gp-usage-alert--metered-near-cap {
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+}
+
+.gp-usage-alert--metered-capped {
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+}
+
+.gp-lifecycle-card {
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 18px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.gp-lifecycle-card__eyebrow {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+.gp-lifecycle-card__title {
+  margin: 6px 0 8px;
+  font-size: 1.05rem;
+}
+
+.gp-lifecycle-card__body,
+.gp-lifecycle-card__meta {
+  margin: 0 0 8px;
+  font-size: 0.9rem;
+  color: #374151;
+}
+
+.gp-lifecycle-card__meta {
+  color: #6b7280;
+  font-size: 0.82rem;
+}
+
+.gp-lifecycle-card__meter {
+  height: 10px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+
+.gp-lifecycle-card__meter-fill {
+  height: 100%;
+  background: #f59e0b;
+}
+
+.gp-lifecycle-card__action {
+  margin-top: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #2563eb;
+  background: #2563eb;
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.gp-lifecycle-card--trial-ending,
+.gp-lifecycle-card--metered-near-cap {
+  border-color: #fcd34d;
+}
+
+.gp-lifecycle-card--metered-capped,
+.gp-lifecycle-card--dunning-retry,
+.gp-lifecycle-card--cancelled {
+  border-color: #fecaca;
+}
+
+.gp-lifecycle-card--paused {
+  border-color: #d1d5db;
+}
+
+.gp-dunning-alert {
+  display: block;
+}
+
+/* Plain-CSS equivalents of the utility classes used by DunningAlertBanner. */
+.rounded-lg { border-radius: 8px; }
+.rounded-md { border-radius: 6px; }
+.rounded-full { border-radius: 999px; }
+.border { border-width: 1px; border-style: solid; }
+.border-amber-300 { border-color: #fcd34d; }
+.border-amber-400 { border-color: #f59e0b; }
+.border-red-300 { border-color: #fca5a5; }
+.border-red-400 { border-color: #f87171; }
+.border-green-300 { border-color: #86efac; }
+.border-gray-300 { border-color: #d1d5db; }
+.bg-amber-50 { background: #fffbeb; }
+.bg-amber-100 { background: #fef3c7; }
+.bg-amber-600 { background: #d97706; }
+.bg-amber-700 { background: #b45309; }
+.bg-red-50 { background: #fef2f2; }
+.bg-green-50 { background: #f0fdf4; }
+.bg-white { background: #fff; }
+.bg-black\/40 { background: rgba(0, 0, 0, 0.4); }
+.bg-amber-500 { background: #f59e0b; }
+.p-3 { padding: 12px; }
+.p-4 { padding: 16px; }
+.p-5 { padding: 20px; }
+.mt-1 { margin-top: 4px; }
+.mt-2 { margin-top: 8px; }
+.mt-3 { margin-top: 12px; }
+.mt-4 { margin-top: 16px; }
+.flex { display: flex; }
+.flex-wrap { flex-wrap: wrap; }
+.flex-col { flex-direction: column; }
+.items-start { align-items: flex-start; }
+.items-end { align-items: flex-end; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+.justify-end { justify-content: flex-end; }
+.gap-1 { gap: 4px; }
+.gap-2 { gap: 8px; }
+.gap-3 { gap: 12px; }
+.min-w-0 { min-width: 0; }
+.w-full { width: 100%; }
+.max-w-md { max-width: 448px; }
+.h-2 { height: 8px; }
+.w-2 { width: 8px; }
+.inline-block { display: inline-block; }
+.text-right { text-align: right; }
+.text-xs { font-size: 0.75rem; line-height: 1rem; }
+.text-sm { font-size: 0.875rem; line-height: 1.25rem; }
+.text-base { font-size: 1rem; line-height: 1.5rem; }
+.font-medium { font-weight: 500; }
+.font-semibold { font-weight: 600; }
+.text-amber-700 { color: #b45309; }
+.text-amber-800 { color: #92400e; }
+.text-amber-900 { color: #78350f; }
+.text-red-600 { color: #dc2626; }
+.text-red-700 { color: #b91c1c; }
+.text-red-800 { color: #991b1b; }
+.text-green-800 { color: #166534; }
+.text-gray-700 { color: #374151; }
+.text-gray-900 { color: #111827; }
+.text-white { color: #fff; }
+.font-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.shadow-xl { box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.2); }
+.fixed { position: fixed; }
+.inset-0 { inset: 0; }
+.z-50 { z-index: 50; }
+.p-4 { padding: 16px; }
+.hover\:bg-amber-100:hover { background: #fef3c7; }
+.hover\:bg-amber-700:hover { background: #b45309; }
+.hover\:bg-red-100:hover { background: #fee2e2; }
+.hover\:bg-gray-50:hover { background: #f9fafb; }
+.disabled\:cursor-not-allowed:disabled { cursor: not-allowed; }
+.disabled\:opacity-50:disabled { opacity: 0.5; }

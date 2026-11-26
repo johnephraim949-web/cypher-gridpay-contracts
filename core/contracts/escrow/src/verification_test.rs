@@ -50,12 +50,18 @@ fn test_cross_contract_invocation_failure_reverts_state() {
     let (env, client, _admin, customer, merchant, token) = setup();
 
     env.ledger().set_timestamp(1000);
-    let escrow_id =
-        client.create_escrow(&customer, &merchant, &1000_i128, &token, &5000_u64, &0_u64, &0_u64, &false);
+    let escrow_id = client.create_escrow(
+        &customer, &merchant, &1000_i128, &token, &5000_u64, &0_u64, &0_u64, &false,
+    );
 
     let mock_id = env.register(MockPaymentContract, ());
     let result = client.try_notify_payment_contract(&escrow_id, &mock_id);
-    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::CrossContractInvocationFailed))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(
+            EscrowError::CrossContractInvocationFailed
+        )))
+    );
     assert_eq!(client.get_escrow_status(&escrow_id), EscrowStatus::Locked);
 }
 

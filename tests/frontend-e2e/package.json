@@ -1,0 +1,17 @@
+{
+  "name": "@cypher-gridpay/frontend-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Playwright E2E scaffolding with a deterministic mock Soroban RPC (issue #361). Dependencies declared by hand; never installed or run.",
+  "scripts": {
+    "test": "playwright test",
+    "test:update-snapshots": "playwright test --update-snapshots",
+    "mock-rpc": "node mocks/sorobanRpcMock.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.10.0",
+    "@playwright/test": "^1.49.0"
+  },
+  "engines": { "node": ">=18" }
+}

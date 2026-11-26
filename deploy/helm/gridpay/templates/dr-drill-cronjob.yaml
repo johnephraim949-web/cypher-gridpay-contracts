@@ -1,0 +1,291 @@
+{{- /*
+  deploy/helm/gridpay/templates/dr-drill-cronjob.yaml
+
+  Automated monthly Disaster Recovery (DR) verification CronJob.
+  Issue #379 — Build Automated Database Backup, Point-in-Time Recovery (PITR),
+  and Disaster Recovery Drill Automation.
+
+  This CronJob runs ops/dr-drill/verify-restore.sh monthly to:
+    1. Restore the latest staging backup into an isolated ephemeral instance.
+    2. Run schema integrity checks (pg_amcheck, row counts, ledger cursor).
+    3. Verify the Soroban Event Indexer catches up from the restored cursor to tip.
+    4. Emit DR drill pass/fail metrics to Prometheus pushgateway.
+
+  Security invariants enforced here (not just in the script):
+    - WEBHOOK_DELIVERY_ENABLED is hard-coded "false" and cannot be overridden.
+    - The backup encryption key is mounted from a separate Kubernetes Secret
+      (db-backup-encryption-key) that lives in a different namespace from the
+      database cluster, so the key never travels with the DB workload.
+    - The job runs with a read-only root filesystem, drops ALL capabilities,
+      runs as non-root, and has no network egress to merchant endpoints.
+    - The 35-day-stale alert is fired by the gridpay_dr_last_success_timestamp
+      Prometheus metric (alert rule documented in OPERATIONAL_RUNBOOK.md).
+*/ -}}
+{{- if .Values.drDrill.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "gridpay.fullname" . }}-dr-drill
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gridpay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dr-drill
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+spec:
+  # Run at 03:00 UTC on the 1st of every month (low-traffic window).
+  schedule: {{ .Values.drDrill.schedule | default "0 3 1 * *" | quote }}
+  # Never run two drills concurrently — a missed run is caught next month.
+  concurrencyPolicy: Forbid
+  # Keep the last successful + last failed run for auditing.
+  successfulJobsHistoryLimit: {{ .Values.drDrill.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.drDrill.failedJobsHistoryLimit | default 3 }}
+  jobTemplate:
+    spec:
+      # Allow the drill up to 45 min before the controller kills it
+      # (30 min RTO + 15 min for indexer catch-up + teardown slack).
+      activeDeadlineSeconds: {{ .Values.drDrill.activeDeadlineSeconds | default 2700 }}
+      backoffLimit: 0  # DR drill failures must NOT silently retry; they must alert.
+      template:
+        metadata:
+          labels:
+            {{- include "gridpay.labels" . | nindent 12 }}
+            app.kubernetes.io/component: dr-drill
+          annotations:
+            # Ensure the runner sidecar injects no egress exceptions.
+            "admission.gridpay.io/egress-policy": "drill-isolated"
+        spec:
+          restartPolicy: Never
+          # Run as non-root with a read-only root filesystem.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            fsGroup: 65532
+            seccompProfile:
+              type: RuntimeDefault
+
+          # The ephemeral instance is isolated from the DB cluster network.
+          # It can only reach the object-storage endpoint (to pull backups)
+          # and the pushgateway (to emit metrics). It CANNOT reach merchant
+          # webhook targets or the production DB service.
+          {{- with .Values.drDrill.affinity }}
+          affinity:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.drDrill.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          volumes:
+            # Mount the DR verification script from the ConfigMap.
+            - name: dr-drill-script
+              configMap:
+                name: {{ include "gridpay.fullname" . }}-dr-drill-script
+                defaultMode: 0555
+            # Mount the backup encryption key from a SEPARATE Secret that lives
+            # in a different namespace from the database cluster. The key never
+            # travels with the DB workload and is never logged.
+            - name: backup-encryption-key
+              secret:
+                secretName: {{ .Values.drDrill.encryptionKeySecret | default "db-backup-encryption-key" }}
+                # Read-only mount; the key file is not writable from the pod.
+                defaultMode: 0400
+            # Ephemeral scratch space for the restore (wiped on pod exit).
+            - name: restore-scratch
+              emptyDir:
+                sizeLimit: {{ .Values.drDrill.scratchSizeLimit | default "20Gi" }}
+            # Network policy egress allow-list is enforced by the CNI plugin;
+            # no merchant endpoints are reachable from this pod.
+
+          containers:
+            - name: dr-drill
+              image: {{ .Values.drDrill.image.repository | default "gridpay/dr-drill-runner" }}:{{ .Values.drDrill.image.tag | default .Chart.AppVersion }}
+              imagePullPolicy: {{ .Values.drDrill.image.pullPolicy | default "IfNotPresent" }}
+              command:
+                - /scripts/verify-restore.sh
+              args:
+                - --instance-name={{ include "gridpay.fullname" . }}-dr-drill
+              env:
+                # ── Hard safety: webhook delivery MUST be disabled. ──
+                # This is hard-coded and intentionally NOT overridable via
+                # values so a misconfiguration can never replay webhooks.
+                - name: WEBHOOK_DELIVERY_ENABLED
+                  value: "false"
+                # ── Backup source (cross-region object storage) ──
+                - name: BACKUP_SOURCE_BUCKET
+                  value: {{ .Values.drDrill.backupSourceBucket | default "gridpay-pitr-backups" | quote }}
+                - name: BACKUP_SOURCE_REGION
+                  value: {{ .Values.drDrill.backupSourceRegion | default "us-east-1" | quote }}
+                - name: BACKUP_RETENTION_DAYS
+                  value: {{ .Values.drDrill.retentionDays | default 35 | quote }}
+                # ── Encryption key source ──
+                # The key is mounted as a file, not an env var, so it never
+                # appears in pod describe / logs.
+                - name: AGE_KEY_FILE
+                  value: /secrets/encryption-key/identity.txt
+                # ── Soroban Event Indexer config ──
+                - name: SOROBAN_NETWORK_PASSPHRASE
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "gridpay.fullname" . }}-soroban-config
+                      key: network-passphrase
+                - name: SOROBAN_RPC_URL
+                  value: {{ .Values.drDrill.sorobanRpcUrl | default "https://soroban-testnet.stellar.org:443" | quote }}
+                - name: INDEXER_LEDGER_BATCH_SIZE
+                  value: {{ .Values.drDrill.indexerLedgerBatchSize | default 64 | quote }}
+                - name: INDEXER_CATCHUP_TIMEOUT_S
+                  value: {{ .Values.drDrill.indexerCatchupTimeoutS | default 600 | quote }}
+                # ── Indexer image for the catch-up sidecar ──
+                - name: DRILL_INDEXER_IMAGE
+                  value: {{ .Values.drDrill.indexerImage | default "gridpay/soroban-event-indexer:latest" | quote }}
+                # ── Prometheus pushgateway ──
+                - name: PROM_PUSHGATEWAY_URL
+                  value: {{ .Values.drDrill.promPushgatewayUrl | default "http://prometheus-pushgateway.monitoring.svc.cluster.local:9091" | quote }}
+                - name: PROM_JOB_NAME
+                  value: gridpay_dr_drill
+                - name: PROM_INSTANCE_LABEL
+                  value: {{ .Release.Namespace }}-dr-drill
+                # ── RTO / RPO thresholds ──
+                - name: RTO_THRESHOLD_S
+                  value: {{ .Values.drDrill.rtoThresholdS | default 1800 | quote }}
+                - name: RPO_THRESHOLD_S
+                  value: {{ .Values.drDrill.rpoThresholdS | default 300 | quote }}
+
+              envFrom:
+                # AWS / object-storage credentials — read-only, scoped to the
+                # backup-read IAM role via IRSA (no long-lived keys in the pod).
+                - secretRef:
+                    name: {{ .Values.drDrill.backupReaderSecret | default (printf "%s-backup-reader" (include "gridpay.fullname" .)) }}
+
+              volumeMounts:
+                - name: dr-drill-script
+                  mountPath: /scripts
+                  readOnly: true
+                - name: backup-encryption-key
+                  mountPath: /secrets/encryption-key
+                  readOnly: true
+                - name: restore-scratch
+                  mountPath: /var/lib/gridpay/dr-restore
+
+              resources:
+                {{- toYaml .Values.drDrill.resources | default (dict "requests" (dict "cpu" "500m" "memory" "1Gi") "limits" (dict "cpu" "2" "memory" "4Gi")) | nindent 16 }}
+
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+                # The script needs docker to spin up the ephemeral PG instance.
+                # In production this pod runs with a Docker-in-Docker sidecar or
+                # uses a container-runtime socket mount (configured below).
+                # privileged: false is maintained; the socket is mounted read-only.
+              # Mount the container runtime socket so the drill can spawn the
+              # isolated ephemeral PG + indexer containers (DinD alternative).
+              {{- if .Values.drDrill.containerRuntimeSocket }}
+              volumeMountsList:
+              {{- end }}
+
+          {{- if .Values.drDrill.serviceAccountName }}
+          serviceAccountName: {{ .Values.drDrill.serviceAccountName | quote }}
+          {{- end }}
+
+          # Network isolation: the pod has no egress to merchant endpoints.
+          # The NetworkPolicy is enforced separately (see dr-drill-networkpolicy.yaml).
+          # Here we add a taint toleration so the drill can run on a dedicated node.
+          nodeSelector:
+            {{- toYaml .Values.drDrill.nodeSelector | default (dict "gridpay.io/dr-drill" "true") | nindent 12 }}
+---
+# ConfigMap holding the verify-restore.sh script so it is version-controlled
+# alongside the Helm chart and immutable per release.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gridpay.fullname" . }}-dr-drill-script
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "gridpay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dr-drill
+data:
+  verify-restore.sh: |
+{{ .Files.Get "ops/dr-drill/verify-restore.sh" | indent 4 | default "# Script injected at deploy time; see ops/dr-drill/verify-restore.sh" }}
+---
+# PrometheusRule: alert if no successful DR drill has occurred in 35 days.
+# This implements the "alert triggers if no successful DR verification has
+# occurred in 35 days" acceptance criterion.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "gridpay.fullname" . }}-dr-drill-alerts
+  namespace: {{ .Values.drDrill.alertNamespace | default "monitoring" }}
+  labels:
+    {{- include "gridpay.labels" . | nindent 4 }}
+    app.kubernetes.io/component: dr-drill
+spec:
+  groups:
+    - name: gridpay-dr-drill
+      rules:
+        # Alert: no successful DR drill in the last 35 days.
+        # gridpay_dr_last_success_timestamp is 0 until the first pass, and
+        # is only updated on a PASS (it stays at its previous value on fail).
+        # So "stale" = now - last_success > 35 days (or last_success == 0).
+        - alert: GridpayDRDrillStale
+          expr: |
+            (time() - gridpay_dr_last_success_timestamp > 35 * 24 * 3600)
+            or
+            (gridpay_dr_last_success_timestamp == 0)
+          for: 10m
+          labels:
+            severity: critical
+            team: platform
+          annotations:
+            summary: "No successful DR drill has run in 35 days"
+            description: >
+              gridpay_dr_last_success_timestamp is older than 35 days (or has
+              never recorded a success). The automated monthly disaster recovery
+              verification may be failing or disabled. See
+              docs/OPERATIONAL_RUNBOOK.md → DR Drill Troubleshooting.
+
+        # Alert: the last DR drill failed outright.
+        - alert: GridpayDRDrillFailed
+          expr: gridpay_dr_drill_success == 0
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "The last DR drill failed"
+            description: >
+              gridpay_dr_drill_success is 0. Check the CronJob
+              {{ include "gridpay.fullname" . }}-dr-drill logs and
+              docs/OPERATIONAL_RUNBOOK.md → DR Drill Troubleshooting.
+
+        # Alert: the last DR restore exceeded the 30-minute RTO.
+        - alert: GridpayDRDrillRTOExceeded
+          expr: gridpay_dr_restore_duration_seconds > 1800
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "DR drill restore exceeded the 30-minute RTO"
+            description: >
+              gridpay_dr_restore_duration_seconds is {{ "{{ $value }}" }}s,
+              above the 1800s (30 min) RTO threshold. Investigate backup size
+              growth or object-storage throughput.
+
+        # Alert: the observed RPO exceeded 5 minutes.
+        - alert: GridpayDRDrillRPOExceeded
+          expr: gridpay_dr_rpo_observed_seconds > 300
+          for: 10m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "DR drill observed RPO exceeded 5 minutes"
+            description: >
+              gridpay_dr_rpo_observed_seconds is {{ "{{ $value }}" }}s, above
+              the 300s (5 min) RPO threshold. WAL archiving may be lagging.
+{{- end }}

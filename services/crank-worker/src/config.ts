@@ -19,6 +19,14 @@ export interface CrankConfig extends CircuitBreakerConfig {
   pollInitialDelayMs: number;
   pollMaxDelayMs: number;
   maxRestoreAttempts: number;
+  otel: OtelConfig;
+}
+
+export interface OtelConfig {
+  enabled: boolean;
+  endpoint?: string;
+  serviceName: string;
+  tracesSampler: string;
 }
 
 function integer(value: string | undefined, fallback: number, name: string): number {
@@ -38,6 +46,33 @@ function csv(value: string | undefined): string[] {
 function required(value: string | undefined, name: string): string {
   if (value === undefined || value.trim() === "") throw new Error(`Missing required environment variable ${name}`);
   return value.trim();
+}
+
+function boolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function optional(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+function loadOtelConfig(env: NodeJS.ProcessEnv): OtelConfig {
+  const endpoint = optional(env.OTEL_EXPORTER_OTLP_ENDPOINT);
+  // Tracing is opt-in: when no endpoint is configured we default to disabled so
+  // services run without an OTel Collector present.
+  const enabled = boolean(env.OTEL_ENABLED, endpoint !== undefined);
+  return {
+    enabled,
+    endpoint,
+    serviceName: optional(env.OTEL_SERVICE_NAME) ?? "crank-worker",
+    tracesSampler: optional(env.OTEL_TRACES_SAMPLER) ?? "parentbased_traceidratio",
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CrankConfig {
@@ -85,6 +120,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CrankConfig {
     pollInitialDelayMs: integer(env.CRANK_POLL_INITIAL_DELAY_MS, 500, "CRANK_POLL_INITIAL_DELAY_MS"),
     pollMaxDelayMs: integer(env.CRANK_POLL_MAX_DELAY_MS, 5_000, "CRANK_POLL_MAX_DELAY_MS"),
     maxRestoreAttempts: integer(env.CRANK_MAX_RESTORE_ATTEMPTS, 2, "CRANK_MAX_RESTORE_ATTEMPTS"),
+    otel: loadOtelConfig(env),
   };
 }
 

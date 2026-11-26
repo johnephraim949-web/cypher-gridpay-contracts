@@ -20,9 +20,9 @@ fn private_payment_hides_vault_until_commitment_reveal() {
     client.initialize(&admin);
 
     let secret = BytesN::<32>::from_array(&env, &[7u8; 32]);
-    let mut preimage = vault.to_xdr(&env);
-    preimage.append(&secret.to_xdr(&env));
-    let commitment = env.crypto().sha256(&preimage);
+    let mut preimage = vault.clone().to_xdr(&env);
+    preimage.append(&secret.clone().to_xdr(&env));
+    let commitment = env.crypto().sha256(&preimage).to_bytes();
     let payment_id = client.create_private_payment(
         &customer,
         &commitment,

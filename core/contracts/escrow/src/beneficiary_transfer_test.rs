@@ -24,7 +24,9 @@ fn setup() -> (
     env.mock_all_auths();
     client.initialize(&admin);
     env.ledger().set_timestamp(1000);
-    client.create_escrow(&customer, &merchant, &1000_i128, &token, &2000_u64, &0_u64, &0_u64, &false);
+    client.create_escrow(
+        &customer, &merchant, &1000_i128, &token, &2000_u64, &0_u64, &0_u64, &false,
+    );
 
     (env, client, admin, customer, merchant, token)
 }
@@ -68,7 +70,10 @@ fn test_transfer_blocked_on_disputed_escrow() {
     client.dispute_escrow(&customer, &1u64);
 
     let result = client.try_transfer_escrow_beneficiary(&merchant, &1u64, &new_merchant);
-    assert_eq!(result, Err(Ok(Error::Action(ActionError::TransferNotAllowed))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Action(ActionError::TransferNotAllowed)))
+    );
 }
 
 #[test]
@@ -80,7 +85,10 @@ fn test_transfer_blocked_on_resolved_escrow() {
     client.resolve_dispute(&admin, &1u64, &false);
 
     let result = client.try_transfer_escrow_beneficiary(&merchant, &1u64, &new_merchant);
-    assert_eq!(result, Err(Ok(Error::Action(ActionError::TransferNotAllowed))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Action(ActionError::TransferNotAllowed)))
+    );
 }
 
 #[test]
@@ -169,8 +177,14 @@ fn test_partial_clawback_allowed_during_seasoning_window() {
 
     env.ledger().set_timestamp(1_000);
     let escrow_id = client.create_escrow(
-        &customer, &merchant, &1_000_i128, &token_id,
-        &5_000_u64, &0_u64, &0_u64, &false,
+        &customer,
+        &merchant,
+        &1_000_i128,
+        &token_id,
+        &5_000_u64,
+        &0_u64,
+        &0_u64,
+        &false,
     );
 
     // Transfer beneficiary — starts the seasoning window.
@@ -206,15 +220,12 @@ fn test_partial_clawback_exceeding_eligible_fails() {
     client.initialize(&admin);
     env.ledger().set_timestamp(1_000);
     let escrow_id = client.create_escrow(
-        &customer, &merchant, &500_i128, &token,
-        &2_000_u64, &0_u64, &0_u64, &false,
+        &customer, &merchant, &500_i128, &token, &2_000_u64, &0_u64, &0_u64, &false,
     );
 
     let evidence = BytesN::from_array(&env, &[7_u8; 32]);
     // Attempt to claw back more than the eligible balance.
-    let result = client.try_execute_partial_clawback(
-        &escrow_id, &admin, &600_i128, &evidence,
-    );
+    let result = client.try_execute_partial_clawback(&escrow_id, &admin, &600_i128, &evidence);
     assert_eq!(
         result,
         Err(Ok(Error::Escrow(EscrowError::InsufficientClawbackBalance)))
