@@ -6,8 +6,8 @@
 //! touched entry's TTL is extended automatically.
 
 use soroban_sdk::{
-    contracttype, symbol_short, xdr::ToXdr, Bytes, BytesN, Env, IntoVal, Symbol, TryFromVal, Val,
-    Vec,
+    contracttype, symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, IntoVal, Symbol,
+    TryFromVal, Val, Vec,
 };
 
 /// Approximate number of ledgers closed per day (~5s per ledger).
@@ -123,6 +123,46 @@ where
 {
     env.storage().persistent().set(key, value);
     extend_persistent(env, key);
+}
+
+/// Removes a persistent entry if present.
+pub fn remove_persistent<K>(env: &Env, key: &K)
+where
+    K: IntoVal<Env, Val>,
+{
+    env.storage().persistent().remove(key);
+}
+
+/// A pending mutual custom-split settlement proposal for a disputed escrow
+/// (Issue #433). Stored under `DataKey::MutualSettlement(escrow_id)`.
+///
+/// `nonce` increments on every (counter-)proposal so a counterparty can pin the
+/// exact terms it is accepting, preventing same-ledger front-running.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct MutualSettlementProposal {
+    pub escrow_id: u64,
+    pub proposer: Address,
+    pub merchant_amount: i128,
+    pub customer_amount: i128,
+    pub expires_at: u64,
+    pub nonce: u32,
+}
+
+/// Buyer inspection window state for a delivered escrow (Issue #434). Stored
+/// under `DataKey::Inspection(escrow_id)`.
+///
+/// `delivered_at` is the ledger timestamp of the delivery attestation,
+/// `inspection_deadline` is when optimistic auto-release unlocks, `extended`
+/// enforces the single-use bounded extension, and `delivery_proof_hash` pins
+/// the attested delivery evidence.
+#[derive(Clone, Debug, PartialEq)]
+#[contracttype]
+pub struct InspectionState {
+    pub delivered_at: u64,
+    pub inspection_deadline: u64,
+    pub extended: bool,
+    pub delivery_proof_hash: BytesN<32>,
 }
 
 /// Depth of the archived-record Merkle accumulator (Issue #243): up to 2^20
