@@ -1,0 +1,17 @@
+rule_files:
+  - gridpay-contracts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="crank-worker"}'
+        values: "0x5"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CrankWorkerDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: crank-worker}
+            exp_annotations:
+              summary: crank-worker is not scraping
+              recovery: up == 1 for 5m
+              runbook_url: docs/OBSERVABILITY_RUNBOOK.md#crankworkerdown

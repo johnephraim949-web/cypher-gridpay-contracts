@@ -604,3 +604,180 @@ fn test_partial_period_usage_before_rollover_is_not_lost() {
     // Nothing carries to next period
     assert_eq!(client.get_current_usage(&sub_id).accumulated_units, 0);
 }
+
+fn tou_bands(env: &Env) -> Vec<TariffBand> {
+    Vec::from_array(
+        env,
+        [
+            TariffBand {
+                start_minute_utc: 0,
+                end_minute_utc: 1200,
+                rate_per_unit: 10,
+                weekend_discount_bps: 0,
+            },
+            TariffBand {
+                start_minute_utc: 1200,
+                end_minute_utc: 1440,
+                rate_per_unit: 20,
+                weekend_discount_bps: 5000,
+            },
+        ],
+    )
+}
+
+#[test]
+fn test_tariff_schedule_requires_clean_partition() {
+    let env = Env::default();
+    let (client, _admin, merchant, _customer, _token) = setup(&env);
+
+    let valid = client.create_tariff_schedule(&merchant, &tou_bands(&env), &0u64);
+    let schedule = client.get_tariff_schedule(&valid).unwrap();
+    assert_eq!(schedule.bands.len(), 2);
+    assert!(schedule.active);
+
+    let gap = Vec::from_array(
+        &env,
+        [
+            TariffBand {
+                start_minute_utc: 0,
+                end_minute_utc: 1000,
+                rate_per_unit: 10,
+                weekend_discount_bps: 0,
+            },
+            TariffBand {
+                start_minute_utc: 1001,
+                end_minute_utc: 1440,
+                rate_per_unit: 20,
+                weekend_discount_bps: 0,
+            },
+        ],
+    );
+    assert_eq!(
+        client.try_create_tariff_schedule(&merchant, &gap, &0u64),
+        Err(Ok(Error::Tariff(TariffError::InvalidSchedule)))
+    );
+
+    let overlap = Vec::from_array(
+        &env,
+        [
+            TariffBand {
+                start_minute_utc: 0,
+                end_minute_utc: 1200,
+                rate_per_unit: 10,
+                weekend_discount_bps: 0,
+            },
+            TariffBand {
+                start_minute_utc: 1000,
+                end_minute_utc: 1440,
+                rate_per_unit: 20,
+                weekend_discount_bps: 0,
+            },
+        ],
+    );
+    assert_eq!(
+        client.try_create_tariff_schedule(&merchant, &overlap, &0u64),
+        Err(Ok(Error::Tariff(TariffError::InvalidSchedule)))
+    );
+
+    let mut too_many = Vec::new(&env);
+    for i in 0..9u32 {
+        too_many.push_back(TariffBand {
+            start_minute_utc: i * 160,
+            end_minute_utc: (i + 1) * 160,
+            rate_per_unit: 10,
+            weekend_discount_bps: 0,
+        });
+    }
+    assert_eq!(
+        client.try_create_tariff_schedule(&merchant, &too_many, &0u64),
+        Err(Ok(Error::Tariff(TariffError::InvalidSchedule)))
+    );
+}
+
+#[test]
+fn test_tou_usage_prices_bands_and_weekend_discount() {
+    let env = Env::default();
+    let (client, _admin, merchant, customer, token) = setup(&env);
+    let sub_id = client.create_metered_subscription(
+        &merchant,
+        &customer,
+        &1i128,
+        &String::from_str(&env, "kwh"),
+        &token,
+        &Some(1000i128),
+        &None,
+    );
+    let schedule_id = client.create_tariff_schedule(&merchant, &tou_bands(&env), &0u64);
+    client.attach_tariff_to_subscription(&merchant, &sub_id, &schedule_id);
+
+    // Day 4 = Monday (weekday): 10 kWh at the 20/unit peak rate.
+    let weekday_peak = 4 * 86400 + 1200 * 60;
+    let weekday_cost = client.report_tou_usage(&merchant, &sub_id, &10u64, &weekday_peak);
+    assert_eq!(weekday_cost, 200i128);
+
+    // Day 2 = Saturday: the same peak band carries a 50% weekend discount.
+    let weekend_peak = 2 * 86400 + 1200 * 60;
+    let weekend_cost = client.report_tou_usage(&merchant, &sub_id, &10u64, &weekend_peak);
+    assert_eq!(weekend_cost, 100i128);
+
+    let usage = client.get_current_usage(&sub_id);
+    assert_eq!(usage.accumulated_units, 20u64);
+    assert_eq!(usage.accumulated_cost, 300i128);
+
+    // Mixed-band usage is billed from accrued cost, not the flat fallback rate.
+    assert_eq!(client.execute_metered_billing(&sub_id), 300i128);
+    let reset = client.get_current_usage(&sub_id);
+    assert_eq!(reset.accumulated_units, 0u64);
+    assert_eq!(reset.accumulated_cost, 0i128);
+}
+
+#[test]
+fn test_tou_hard_cap_respected_across_reports() {
+    let env = Env::default();
+    let (client, _admin, merchant, customer, token) = setup(&env);
+    let sub_id = client.create_metered_subscription(
+        &merchant,
+        &customer,
+        &1i128,
+        &String::from_str(&env, "kwh"),
+        &token,
+        &Some(250i128),
+        &None,
+    );
+    let schedule_id = client.create_tariff_schedule(&merchant, &tou_bands(&env), &0u64);
+    client.attach_tariff_to_subscription(&merchant, &sub_id, &schedule_id);
+
+    let weekday_peak = 4 * 86400 + 1300 * 60;
+    assert_eq!(
+        client.report_tou_usage(&merchant, &sub_id, &10u64, &weekday_peak),
+        200i128
+    );
+    assert_eq!(
+        client.try_report_tou_usage(&merchant, &sub_id, &10u64, &weekday_peak),
+        Err(Ok(Error::Subscription(SubscriptionError::BillingCapExceeded)))
+    );
+    // Rejected usage does not leak into the accrued cycle cost.
+    assert_eq!(client.get_current_usage(&sub_id).accumulated_cost, 200i128);
+    assert_eq!(client.execute_metered_billing(&sub_id), 200i128);
+}
+
+#[test]
+fn test_tariff_cannot_reprice_reported_usage() {
+    let env = Env::default();
+    let (client, _admin, merchant, customer, token) = setup(&env);
+    let sub_id = client.create_metered_subscription(
+        &merchant,
+        &customer,
+        &1i128,
+        &String::from_str(&env, "kwh"),
+        &token,
+        &None,
+        &None,
+    );
+    let schedule_id = client.create_tariff_schedule(&merchant, &tou_bands(&env), &0u64);
+    client.report_usage(&merchant, &sub_id, &3u64);
+    assert_eq!(
+        client.try_attach_tariff_to_subscription(&merchant, &sub_id, &schedule_id),
+        Err(Ok(Error::Tariff(TariffError::NotAttachable)))
+    );
+}

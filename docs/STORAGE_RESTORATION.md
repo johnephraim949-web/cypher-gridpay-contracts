@@ -128,6 +128,51 @@ Use it when:
 - The caller can enumerate the exact ledger keys the call depends on.
 - The number of archived keys is small (fits in a single transaction).
 
+#### Automated two-step flow in the web app
+
+The web app implements the automated path as a guided two-step flow inside the
+`TransactionReviewDrawer` (`apps/web/src/components/tx/TransactionReviewDrawer.tsx`),
+driven by the `useGridPayTransaction` hook
+(`apps/web/src/hooks/useGridPayTransaction.ts`):
+
+1. **Detect.** Before the wallet signing prompt is shown, the drawer runs
+   `simulateTransaction` (via `sdk/typescript/src/transactions.ts`). If the
+   simulation response contains a `restorePreamble`, the drawer flags the
+   transaction as requiring restoration and surfaces the
+   **"Restore Archived Entry"** remediation action. The affected contract
+   addresses and the archived ledger keys are listed in the operation summary.
+2. **Restore.** Selecting **"Restore Archived Entry"** submits the restore
+   operation built from the `restorePreamble` (the same ledger keys the
+   simulation reported). The progress tracker shows `Simulating` →
+   `Awaiting Signature` → `Submitted` → `Confirmed on Ledger #X`, with a
+   Stellar Expert explorer link for each submitted transaction.
+3. **Re-simulate.** Once the restore transaction is confirmed, the drawer
+   automatically re-runs `simulateTransaction` for the original contract call.
+   The re-simulation is expected to return without a `restorePreamble`; the
+   drawer then advances to the normal signing step for the contract invocation.
+4. **Execute.** The original contract call is submitted and tracked to
+   confirmation as usual.
+
+If the re-simulation still reports a `restorePreamble` (for example, additional
+keys were archived or the restore did not cover every dependency), the drawer
+keeps the remediation action visible and prompts the operator to escalate to
+[manual keeper/admin restoration](#manual-keeperadmin-restoration).
+
+#### Error remediation in the drawer
+
+When simulation or submission fails, the drawer maps the contract error code
+through `decodeGridPayError` (`sdk/typescript/src/errors.ts`) and renders the
+structured `category`, `message`, and `resolution`, along with a contextual
+action button. Archived-entry failures map to the **"Restore Archived Entry"**
+action described above; other categories surface their own actions (for
+example, **"Approve Token Allowance"** or **"Retry with Higher Fee"**).
+
+RPC polling states `TRY_AGAIN_LATER` and `NOT_FOUND` are retried with bounded
+exponential backoff and a timeout, after which the drawer reports a recoverable
+error rather than hanging. When the user selects **"Copy Debug Diagnostics"**,
+sensitive memo and auth payload fields are redacted before the diagnostics are
+copied for a support ticket.
+
 ### Manual keeper/admin restoration
 
 Escalate to manual restoration when the automated preamble cannot cover the

@@ -1,34 +1,30 @@
-# Cypher GridPay Smart Contracts
+# GridPay Contracts
 
-Stellar-based smart contracts for Cypher GridPay. Secure, auditable, and transparent payment infrastructure.
+Soroban smart contracts and SDKs for the GridPay payment, escrow, and refund platform on Stellar.
 
-## 🏗️ Architecture
+## Documentation
 
-Cypher GridPay uses Soroban smart contracts on Stellar for:
-- **Payment Processing**: Accept and lock crypto payments
-- **Settlement**: Convert and transfer to merchants in USDC
-- **Escrow**: Hold funds during dispute periods
-- **Refunds**: Process customer refunds
+- [Mainnet Launch Checklist](docs/MAINNET_LAUNCH_CHECKLIST.md)
+- [Operational Runbook](docs/OPERATIONAL_RUNBOOK.md)
+- [TypeScript SDK Cookbook & Browser/Node Integration Guide](docs/TYPESCRIPT_SDK.md)
+- [TypeScript SDK README](sdk/typescript/README.md)
 
-## 📋 Prerequisites
+## SDKs
 
-- Rust 1.74.0 or later
-- Stellar CLI (`stellar` command)
-- Soroban SDK
+- TypeScript: [`@cypher-gridpay/contracts-sdk`](sdk/typescript/README.md) — see the [full cookbook](docs/TYPESCRIPT_SDK.md) for transaction lifecycle helpers, typed error decoding, event parsing, and browser/Node integration.
+- Python: [`sdk/python`](sdk/python/README.md)
 
-### Installation
+## Examples
 
-```bash
-# Install Rust
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+Runnable TypeScript examples live in [`examples/typescript/`](examples/typescript/):
 
-# Install Stellar CLI
-cargo install --locked stellar-cli --features opt
+- `create-payment.ts` — create a payment with simulation and TTL restoration
+- `escrow-milestone.ts` — release an escrow milestone
+- `event-listener.ts` — stream and parse contract events
 
-# Add wasm target
-rustup target add wasm32-unknown-unknown
-```
+## Development
 
+See the individual SDK READMEs and the operational runbook for local development, binding regeneration (`./scripts/generate-ts-bindings.sh`), and deployment workflows.
 ## 🚀 Quick Start
 
 ### Build All Contracts
@@ -193,6 +189,18 @@ deployment details.
 | [Changelog](CHANGELOG.md) |
 
 Community chat is available on Telegram at https://t.me/+afM9uh7GGtVkYmZk.
+## 🔗 Links
+
+- [Merchant Integration Guide](docs/MERCHANT_INTEGRATION_GUIDE.md)
+- [TypeScript SDK](sdk/typescript/README.md)
+- [Python SDK](docs/PYTHON_SDK.md)
+- [Storage Versioning Guide](docs/STORAGE_VERSIONING.md)
+- [Storage Restoration Guide](docs/STORAGE_RESTORATION.md)
+- [Subscriptions, Metered Billing, Dunning & Streaming Guide](docs/SUBSCRIPTIONS_AND_STREAMING_GUIDE.md)
+- Telegram: https://t.me/+afM9uh7GGtVkYmZk
+- [API Repository](https://github.com/cypher-gridpay/cypher-gridpay-api)
+- [SDK Repository](https://github.com/cypher-gridpay/cypher-gridpay-sdk)
+
 
 ## License
 

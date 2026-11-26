@@ -445,10 +445,7 @@ fn test_escrow_swap_rejects_stale_oracle_price() {
     client.configure_escrow_swap(&merchant, &escrow_id, &target_token, &1400_i128, &oracle);
 
     let res = client.try_execute_escrow_swap(&merchant, &escrow_id);
-    assert_eq!(
-        res,
-        Err(Ok(Error::Action(ActionError::StaleOraclePrice)))
-    );
+    assert_eq!(res, Err(Ok(Error::Action(ActionError::StaleOraclePrice))));
 }
 
 /// MEV sandwich-attack protection: configure_escrow_swap now locks the oracle
@@ -497,8 +494,10 @@ fn test_mev_sandwich_protection_via_rate_lock() {
 
     // Verify that the locked_rate captured the rate at configure time.
     let config = client.get_swap_config(&escrow_id).unwrap();
-    assert_eq!(config.locked_rate, 15_000_000_i128,
-        "configure_escrow_swap must lock the oracle rate at call time");
+    assert_eq!(
+        config.locked_rate, 15_000_000_i128,
+        "configure_escrow_swap must lock the oracle rate at call time"
+    );
 
     // Step 2: simulate a sandwich — attacker moves oracle rate to 1.41 (just
     // above the 1.4 × 1000 = 1400 min_output threshold) between configure and
@@ -508,8 +507,10 @@ fn test_mev_sandwich_protection_via_rate_lock() {
 
     // Step 3: execute must use the locked rate (1.5), not the manipulated rate.
     let output = client.execute_escrow_swap(&merchant, &escrow_id);
-    assert_eq!(output, 1500_i128,
-        "execute_escrow_swap must use the locked rate, not the sandwiched oracle rate");
+    assert_eq!(
+        output, 1500_i128,
+        "execute_escrow_swap must use the locked rate, not the sandwiched oracle rate"
+    );
 
     let escrow = client.get_escrow(&escrow_id);
     assert_eq!(escrow.token, target_token);
@@ -557,5 +558,8 @@ fn test_mev_rate_lock_still_enforces_min_output() {
     oracle_client.set_updated_at(&999_999_u64);
 
     let res = client.try_execute_escrow_swap(&merchant, &escrow_id);
-    assert_eq!(res, Err(Ok(Error::Action(ActionError::SwapOutputBelowMinimum))));
+    assert_eq!(
+        res,
+        Err(Ok(Error::Action(ActionError::SwapOutputBelowMinimum)))
+    );
 }

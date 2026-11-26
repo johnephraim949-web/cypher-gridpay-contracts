@@ -53,7 +53,10 @@ fn test_threshold_zero_rejected() {
     );
 
     let result = client.try_execute_action(&proposal_id);
-    assert_eq!(result, Err(Ok(Error::Escrow(EscrowError::InvalidThreshold))));
+    assert_eq!(
+        result,
+        Err(Ok(Error::Escrow(EscrowError::InvalidThreshold)))
+    );
 }
 
 #[test]
@@ -102,10 +105,7 @@ fn test_threshold_increase_invalidates_pending_proposal_approvals() {
 
     // The stale proposal cannot ride on approvals gathered under the old rule.
     let stale = client.try_execute_action(&pending);
-    assert_eq!(
-        stale,
-        Err(Ok(Error::Escrow(EscrowError::InvalidStatus)))
-    );
+    assert_eq!(stale, Err(Ok(Error::Escrow(EscrowError::InvalidStatus))));
 
     // Re-approving restarts collection under the new threshold: one admin is
     // still not enough, two are.
@@ -123,7 +123,7 @@ fn test_threshold_increase_invalidates_pending_proposal_approvals() {
 
 // ── Issue #219: Timelocked participant key rotation & recovery guardian tests ─
 
-use soroban_sdk::{token, testutils::Ledger, Vec as SorobanVec};
+use soroban_sdk::{testutils::Ledger, token, Vec as SorobanVec};
 
 /// Creates a minimal two-participant multi-party escrow and returns its ID.
 /// Mints `total_amount` tokens to the contract address so later transfers succeed.
@@ -186,8 +186,7 @@ fn test_owner_key_rotation_succeeds_after_timelock() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     // p1 (owner) proposes their own rotation with a 300-second timelock.
     env.ledger().set_timestamp(2_000);
@@ -210,8 +209,12 @@ fn test_owner_key_rotation_succeeds_after_timelock() {
     let mut found_old = false;
     let mut found_new = false;
     for p in escrow.participants.iter() {
-        if p.address == p1 { found_old = true; }
-        if p.address == p1_new { found_new = true; }
+        if p.address == p1 {
+            found_old = true;
+        }
+        if p.address == p1_new {
+            found_new = true;
+        }
     }
     assert!(!found_old);
     assert!(found_new);
@@ -230,8 +233,7 @@ fn test_guardian_can_propose_rotation() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     // p1 registers a guardian.
     client.register_recovery_guardian(&p1, &escrow_id, &guardian);
@@ -247,8 +249,12 @@ fn test_guardian_can_propose_rotation() {
     let mut found_new = false;
     let mut found_old = false;
     for p in escrow.participants.iter() {
-        if p.address == p1_new { found_new = true; }
-        if p.address == p1 { found_old = true; }
+        if p.address == p1_new {
+            found_new = true;
+        }
+        if p.address == p1 {
+            found_old = true;
+        }
     }
     assert!(found_new);
     assert!(!found_old);
@@ -267,11 +273,10 @@ fn test_unauthorised_proposer_rejected() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
-    let result = client
-        .try_propose_participant_key_rotation(&rando, &escrow_id, &p1, &p1_new, &300u64);
+    let result =
+        client.try_propose_participant_key_rotation(&rando, &escrow_id, &p1, &p1_new, &300u64);
     assert_eq!(result, Err(Ok(Error::Basic(BasicError::Unauthorized))));
 }
 
@@ -288,8 +293,7 @@ fn test_owner_veto_blocks_execution() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     // Register guardian and let guardian propose rotation.
     client.register_recovery_guardian(&p1, &escrow_id, &guardian);
@@ -312,7 +316,9 @@ fn test_owner_veto_blocks_execution() {
     let escrow = client.get_multi_party_escrow(&escrow_id);
     let mut found_old = false;
     for p in escrow.participants.iter() {
-        if p.address == p1 { found_old = true; }
+        if p.address == p1 {
+            found_old = true;
+        }
     }
     assert!(found_old);
 }
@@ -329,8 +335,7 @@ fn test_counterparty_veto_blocks_execution() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     env.ledger().set_timestamp(2_000);
     client.propose_participant_key_rotation(&p1, &escrow_id, &p1, &p1_new, &300u64);
@@ -358,12 +363,10 @@ fn test_duplicate_new_participant_rejected() {
     let p2 = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     // Attempting to rotate p1 → p2 (p2 already exists) must fail.
-    let result =
-        client.try_propose_participant_key_rotation(&p1, &escrow_id, &p1, &p2, &300u64);
+    let result = client.try_propose_participant_key_rotation(&p1, &escrow_id, &p1, &p2, &300u64);
     assert_eq!(
         result,
         Err(Ok(Error::Escrow(EscrowError::DuplicateParticipant)))
@@ -382,8 +385,7 @@ fn test_vote_weight_migrated_after_rotation() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     // Manually set p1's weight to 6_000 so we can confirm migration.
     // Adjust p2 to 4_000 to keep total at 10_000.
@@ -418,8 +420,7 @@ fn test_stale_approval_cleared_after_rotation() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     // p1 approves release before their key is rotated.
     client.approve_release(&p1, &escrow_id);
@@ -453,8 +454,7 @@ fn test_duplicate_pending_rotation_rejected() {
     let p1_new2 = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     env.ledger().set_timestamp(2_000);
     client.propose_participant_key_rotation(&p1, &escrow_id, &p1, &p1_new, &300u64);
@@ -480,8 +480,7 @@ fn test_veto_after_window_closes_rejected() {
     let p1_new = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     env.ledger().set_timestamp(2_000);
     client.propose_participant_key_rotation(&p1, &escrow_id, &p1, &p1_new, &300u64);
@@ -508,8 +507,7 @@ fn test_non_participant_cannot_veto() {
     let outsider = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     env.ledger().set_timestamp(2_000);
     client.propose_participant_key_rotation(&p1, &escrow_id, &p1, &p1_new, &300u64);
@@ -531,8 +529,7 @@ fn test_non_participant_cannot_register_guardian() {
     let guardian = Address::generate(&env);
 
     env.ledger().set_timestamp(1_000);
-    let escrow_id =
-        make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
+    let escrow_id = make_multi_party_escrow(&env, &client, &customer, &p1, &p2, &token_addr, 2_000);
 
     let result = client.try_register_recovery_guardian(&outsider, &escrow_id, &guardian);
     assert_eq!(result, Err(Ok(Error::Basic(BasicError::Unauthorized))));

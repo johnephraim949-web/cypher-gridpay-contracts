@@ -1,0 +1,123 @@
+name: Nightly Fuzz and Differential
+
+# Issue #366. Runs tests/e2e (which ci.yml does not execute):
+#   * differential_wasm  - native vs compiled-WASM execution (`make differential`)
+#   * state_machine_fuzz - stateful proptest with elevated PROPTEST_CASES
+# The differential test compares against WASM built from the SAME checkout (no
+# external baseline artifact is fetched); `make differential` runs `make build`
+# first and REQUIRE_WASM=1 makes a missing .wasm a hard failure. Comparing
+# against a previously released WASM would need a baseline artifact (e.g. from a
+# release) and a GRIDPAY_WASM_DIR pointing at it; that is NOT implemented here.
+# Added as a new file because ci.yml is contended; the PR job below covers
+# the "run make differential on PRs" part without editing ci.yml.
+
+on:
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      proptest_cases:
+        description: PROPTEST_CASES for state_machine_fuzz
+        default: '2000'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'core/**'
+      - 'orchestrator/**'
+      - 'tests/e2e/**'
+      - '.github/workflows/nightly-fuzz.yml'
+
+concurrency:
+  group: nightly-fuzz-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-differential:
+    name: E2E differential (native vs WASM)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event_name == 'pull_request' && 30 || 90 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust (cached)
+        uses: ./.github/actions/setup-rust-cached
+        with:
+          cache-key-suffix: e2e
+
+      - name: make differential
+        env:
+          REQUIRE_WASM: '1'
+        run: make differential 2>&1 | tee differential.log
+
+      - name: Archive logs and regressions
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: differential-failure
+          path: |
+            differential.log
+            tests/e2e/proptest-regressions/
+          if-no-files-found: ignore
+
+  state-machine-fuzz:
+    name: State-machine fuzz (nightly)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Rust (cached)
+        uses: ./.github/actions/setup-rust-cached
+        with:
+          install-stellar-cli: "false"
+          cache-key-suffix: e2e
+
+      - name: Run state_machine_fuzz
+        working-directory: tests/e2e
+        env:
+          PROPTEST_CASES: ${{ inputs.proptest_cases || '2000' }}
+          RUST_BACKTRACE: '1'
+        run: |
+          echo "PROPTEST_CASES=$PROPTEST_CASES (failing seeds are written to proptest-regressions/ and printed below)"
+          cargo test --test state_machine_fuzz -- --nocapture 2>&1 | tee ../../fuzz.log
+
+      - name: Archive logs and regression seeds
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failure
+          path: |
+            fuzz.log
+            tests/e2e/proptest-regressions/
+          if-no-files-found: ignore
+
+  report-failure:
+    name: Open/update failure issue
+    needs: [e2e-differential, state-machine-fuzz]
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write # only job with write access
+    steps:
+      - name: Create or comment on tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Nightly fuzz/differential run failed"
+          body="Run: ${RUN_URL}
+          Download the \`fuzz-failure\` / \`differential-failure\` artifacts for logs and proptest-regressions seeds."
+          existing=$(gh issue list --repo "$REPO" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" --body "$body"
+          else
+            gh issue create --repo "$REPO" --title "$title" --body "$body"
+          fi

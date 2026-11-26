@@ -1,0 +1,158 @@
+name: PR Hygiene
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-hygiene-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate-title:
+    name: Validate PR Title (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title format
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const title = (pr.title || '').trim();
+            const author = (pr.user && pr.user.login) || '';
+            const isBot =
+              (pr.user && pr.user.type === 'Bot') ||
+              /\[bot\]$/i.test(author) ||
+              /^dependabot(\[bot\])?$/i.test(author) ||
+              /^renovate(\[bot\])?$/i.test(author);
+
+            // Conventional Commit pattern:
+            // type(optional-scope)!: description
+            const conventional =
+              /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|devops|security)(\([a-z0-9._\-\/]+\))?!?:\s+\S.*$/i;
+
+            if (conventional.test(title)) {
+              core.info(`PR title is valid: "${title}"`);
+              return;
+            }
+
+            // Allow bot PRs that use conventional prefixes even if slightly off,
+            // and allow Dependabot's default "Bump ..." titles by treating them as chore.
+            if (isBot) {
+              const botConventional =
+                /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert|devops|security)(\([a-z0-9._\-\/]+\))?!?:\s+\S.*$/i;
+              const dependabotBump = /^bump\s+/i;
+              if (botConventional.test(title) || dependabotBump.test(title)) {
+                core.info(`Bot PR title accepted: "${title}"`);
+                return;
+              }
+            }
+
+            const message = [
+              '❌ **Invalid PR title.**',
+              '',
+              'PR titles must follow the [Conventional Commits](https://www.conventionalcommits.org/) format:',
+              '',
+              '```',
+              '<type>(<optional-scope>): <description>',
+              '```',
+              '',
+              '**Allowed types:** `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`, `devops`, `security`',
+              '',
+              '**Examples:**',
+              '- `feat(payment): add recurring payment support`',
+              '- `fix(escrow): resolve release race condition`',
+              '- `devops: add terraform module for RDS`',
+              '- `docs: update SDK quickstart`',
+              '',
+              `Current title: \`${title}\``,
+            ].join('\n');
+
+            core.setFailed(message);
+
+  label:
+    name: Apply Domain Labels
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply labels based on changed files
+        uses: actions/labeler@v5
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          configuration-path: .github/labeler.yml
+          sync-labels: false
+
+  security-checklist:
+    name: Security Checklist (Sensitive Paths)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify security checklist for sensitive changes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const { owner, repo } = context.repo;
+            const pull_number = pr.number;
+
+            // Fetch changed files (read-only metadata; no checkout of fork code).
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner, repo, pull_number, per_page: 100 }
+            );
+
+            const sensitivePatterns = [
+              /^core\/contracts\//,
+              /^orchestrator\//,
+            ];
+
+            const sensitiveFiles = files
+              .map((f) => f.filename)
+              .filter((name) => sensitivePatterns.some((re) => re.test(name)));
+
+            if (sensitiveFiles.length === 0) {
+              core.info('No sensitive paths modified; security checklist not required.');
+              return;
+            }
+
+            core.info(`Sensitive files modified:\n${sensitiveFiles.join('\n')}`);
+
+            const body = pr.body || '';
+            const checklistHeading = /##\s*Security Checklist/i;
+            const checkedItem = /-\s*\[[xX]\]/;
+
+            const hasHeading = checklistHeading.test(body);
+            const hasCheckedItem = checkedItem.test(body);
+
+            if (hasHeading && hasCheckedItem) {
+              core.info('Security checklist present and acknowledged.');
+              return;
+            }
+
+            const message = [
+              '❌ **Security checklist required.**',
+              '',
+              'This PR modifies security-sensitive paths:',
+              '',
+              ...sensitiveFiles.map((f) => `- \`${f}\``),
+              '',
+              'Please add the following section to the PR description and check the applicable items:',
+              '',
+              '```markdown',
+              '## Security Checklist',
+              '',
+              '- [ ] I have reviewed the changes for security implications (reentrancy, access control, overflow, etc.).',
+              '- [ ] I have run the relevant security tests / audits.',
+              '- [ ] I have confirmed no secrets or sensitive data are exposed.',
+              '- [ ] I have requested review from the appropriate code owners.',
+              '```',
+            ].join('\n');
+
+            core.setFailed(message);

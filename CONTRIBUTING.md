@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to Cypher GridPay! We welcome contributions from the community to help build secure and reliable payment infrastructure on Stellar.
 
+> 🧭 **New contributor? Start with the [Developer Onboarding & Local Debugging Handbook](docs/DEVELOPER_ONBOARDING.md).** It covers exact toolchain installation, the `core/` vs. `orchestrator/` dual-workspace layout, targeted test runs, Soroban diagnostic logs, auth debugging, snapshot updates, and a troubleshooting FAQ.
+
 ## 📜 Code of Conduct
 
 This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to the project maintainers.
@@ -15,6 +17,8 @@ Before you begin, ensure you have:
 - Stellar CLI installed (`cargo install --locked stellar-cli --features opt`)
 - Basic understanding of Soroban smart contracts
 - Git for version control
+
+> 📖 For the full, step-by-step setup (including `wasm32v1-none`, Node.js, Python, Docker, and `pre-commit`), see [docs/DEVELOPER_ONBOARDING.md](docs/DEVELOPER_ONBOARDING.md).
 
 ### Development Setup
 
@@ -71,6 +75,8 @@ To reset all data:
 ```bash
 docker-compose down -v
 ```
+
+> 🛠️ Hitting port conflicts or linker errors? See the [Troubleshooting FAQ](docs/DEVELOPER_ONBOARDING.md#9-troubleshooting-faq).
 
 ### Makefile Targets
 
@@ -160,6 +166,10 @@ Test requirements:
 > auth/reentrancy, cross-contract E2E, property/fuzz, differential WASM),
 > deterministic fixtures, time-travel helpers, and copyable templates — see
 > [docs/TESTING_GUIDE.md](docs/TESTING_GUIDE.md).
+
+> ⚠️ **Never use `mock_all_auths()` in authorization-rejection tests.** Use explicit
+> `MockAuth` so the test actually proves `require_auth` is enforced. See
+> [Debugging auth failures](docs/DEVELOPER_ONBOARDING.md#5-debugging-auth-failures).
 
 ### 4. Format Your Code
 
@@ -254,23 +264,5 @@ Then open a Pull Request on GitHub with:
 /// 
 /// # Panics
 /// Panics if amount is zero
-pub fn create_payment(env: Env, from: Address, amount: i128) -> u64 {
-    // Implementation
-}
-
-// ❌ Avoid: Undocumented functions with unclear logic
-pub fn cp(e: Env, f: Address, a: i128) -> u64 {
-    // Implementation
-}
+pub fn create_payment(env: Env, from: Address, amount: i128) -> u64
 ```
-
-### Testing Guidelines
-
-```rust
-#[test]
-fn test_payment_creation() {
-    let env = Env::default();
-    // Setup test data
-
-
-/* … truncated 248 chars — edit only what you need near the top … */

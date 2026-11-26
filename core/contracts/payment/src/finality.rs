@@ -10,8 +10,8 @@
 use soroban_sdk::{contractevent, contracttype, symbol_short, token, Address, Env, Symbol};
 
 use crate::{
-    DataKey, Error, MerchantVerificationLevel, MultiSigConfig, Payment,
-    PaymentError, PaymentKey, PendingSettlement, StateDataKey, BasicError, ConfigKey,
+    BasicError, ConfigKey, DataKey, Error, MerchantVerificationLevel, MultiSigConfig, Payment,
+    PaymentError, PaymentKey, PendingSettlement, StateDataKey,
 };
 
 const BPS_DENOM: u128 = 10_000;
@@ -98,7 +98,8 @@ pub fn compute_required_finality_delay(env: &Env, payment: &Payment, legacy_dela
     };
     let mut delay = base as u128;
 
-    if payment.amount >= cfg.high_value_threshold && cfg.high_value_multiplier_bps > BPS_DENOM as u32
+    if payment.amount >= cfg.high_value_threshold
+        && cfg.high_value_multiplier_bps > BPS_DENOM as u32
     {
         delay = delay.saturating_mul(cfg.high_value_multiplier_bps as u128) / BPS_DENOM;
     }
@@ -106,9 +107,9 @@ pub fn compute_required_finality_delay(env: &Env, payment: &Payment, legacy_dela
     let level: MerchantVerificationLevel = env
         .storage()
         .instance()
-        .get(&DataKey::Merchant(crate::MerchantDataKey::VerificationLevel(
-            payment.merchant.clone(),
-        )))
+        .get(&DataKey::Merchant(
+            crate::MerchantDataKey::VerificationLevel(payment.merchant.clone()),
+        ))
         .unwrap_or(MerchantVerificationLevel::Unverified);
     let max_discount = core::cmp::min(cfg.verified_merchant_discount_bps as u128, BPS_DENOM);
     let discount_bps = match level {
@@ -155,9 +156,13 @@ pub fn flag(env: &Env, payment_id: u64, challenger: &Address, reason: Symbol) ->
     if env
         .storage()
         .instance()
-        .has(&DataKey::State(StateDataKey::SettlementFinalized(payment_id)))
+        .has(&DataKey::State(StateDataKey::SettlementFinalized(
+            payment_id,
+        )))
     {
-        return Err(Error::Feature(crate::FeatureError::SettlementAlreadyFinalized));
+        return Err(Error::Feature(
+            crate::FeatureError::SettlementAlreadyFinalized,
+        ));
     }
     if env.ledger().timestamp() >= settlement.release_at {
         return Err(Error::Payment(PaymentError::FinalityWindowClosed));
@@ -243,4 +248,3 @@ pub fn resolve(env: &Env, admin: &Address, payment_id: u64, refund: bool) -> Res
     .publish(env);
     Ok(())
 }
-

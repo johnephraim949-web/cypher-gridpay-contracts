@@ -61,3 +61,16 @@ crank-test: crank-install
 
 .PHONY: differential default all test build check-size fmt clippy check doc clean crank-install crank-build crank-test
 .PHONY: differential default all test build check-size fmt clippy check doc relayer-install relayer-test clean
+
+# Local standalone Stellar stack (issue #363). Run `make build` first for the seed profile.
+localnet-up:
+	docker compose --profile seed up -d
+
+localnet-down:
+	docker compose --profile seed down
+
+localnet-reset:
+	docker compose --profile seed down -v --remove-orphans
+	docker compose --profile seed up -d
+
+.PHONY: localnet-up localnet-down localnet-reset

@@ -419,7 +419,10 @@ fn test_migrate_schema_step_migrates_100_escrows_in_5_batches() {
             let blocked = client.try_create_escrow(
                 &customer, &merchant, &500_i128, &token, &1000_u64, &0_u64, &0_u64, &false,
             );
-            assert_eq!(blocked, Err(Ok(Error::Basic(BasicError::MigrationInProgress))));
+            assert_eq!(
+                blocked,
+                Err(Ok(Error::Basic(BasicError::MigrationInProgress)))
+            );
             assert_eq!(client.get_escrow_status(&1), EscrowStatus::Locked);
         }
     }

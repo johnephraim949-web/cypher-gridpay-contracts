@@ -228,7 +228,14 @@ mod risk_tier {
 
     fn setup_risk(
         oracle: Option<Address>,
-    ) -> (Env, PaymentContractClient<'static>, Address, Address, Address, Address) {
+    ) -> (
+        Env,
+        PaymentContractClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         let (env, client, admin, token_addr) = setup();
         let customer = Address::generate(&env);
         let merchant = Address::generate(&env);
